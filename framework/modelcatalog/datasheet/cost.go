@@ -2120,6 +2120,20 @@ func (s *Store) getBasePricing(model, provider string, requestType schemas.Reque
 		}
 	}
 
+	// datasheet 里零行的 provider（自定义代理 provider）兜底到官方 vendor 的价格行
+	modes := []string{mode}
+	if hasFallbackMode {
+		modes = append(modes, fallbackMode)
+	}
+	if requestType == schemas.ImageEditRequest ||
+		requestType == schemas.ImageEditStreamRequest ||
+		requestType == schemas.ImageVariationRequest {
+		modes = append(modes, normalizeRequestType(schemas.ImageGenerationRequest))
+	}
+	if row, ok := s.crossProviderFallbackUnsafe(model, s.baseModelNameUnsafe(model), provider, modes); ok {
+		return row, true
+	}
+
 	return nil, false
 }
 

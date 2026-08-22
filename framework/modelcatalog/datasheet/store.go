@@ -177,7 +177,7 @@ func (s *Store) Get(model string, provider schemas.ModelProvider, requestType sc
 func (s *Store) GetPricingEntryForModel(model string, provider schemas.ModelProvider) *Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, mode := range []schemas.RequestType{
+	modes := []schemas.RequestType{
 		schemas.TextCompletionRequest,
 		schemas.ChatCompletionRequest,
 		schemas.ResponsesRequest,
@@ -190,11 +190,19 @@ func (s *Store) GetPricingEntryForModel(model string, provider schemas.ModelProv
 		schemas.ImageVariationRequest,
 		schemas.VideoGenerationRequest,
 		schemas.OCRRequest,
-	} {
+	}
+	for _, mode := range modes {
 		key := makeKey(model, string(provider), normalizeRequestType(mode))
 		if pricing, ok := s.pricingData[key]; ok {
 			return convertTablePricingToEntry(&pricing)
 		}
+	}
+	names := make([]string, len(modes))
+	for i, mode := range modes {
+		names[i] = normalizeRequestType(mode)
+	}
+	if row, ok := s.crossProviderFallbackUnsafe(model, s.baseModelNameUnsafe(model), string(provider), names); ok {
+		return convertTablePricingToEntry(row)
 	}
 	return nil
 }
@@ -221,6 +229,11 @@ func (s *Store) GetCapabilityEntry(model string, provider schemas.ModelProvider)
 
 	if entry := s.capabilityEntryForFamilyUnsafe(baseModel, provider); entry != nil {
 		return entry
+	}
+
+	// datasheet 里零行的 provider（自定义代理 provider）兜底到官方 vendor 的价格行
+	if row, ok := s.crossProviderFallbackUnsafe(model, baseModel, string(provider), capabilityPreferredModes); ok {
+		return convertTablePricingToEntry(row)
 	}
 	return nil
 }
@@ -425,6 +438,87 @@ func (s *Store) selectCapabilityEntryFromKeysUnsafe(matchingKeys []string) *Entr
 	slices.Sort(matchingKeys)
 	pricing := s.pricingData[matchingKeys[0]]
 	return convertTablePricingToEntry(&pricing)
+}
+
+// inferVendorProvider 推断裸模型名的官方定价 provider
+// 先走模型家族检测器，再取模型名首个 -/ 前的片段，推断不出返回空串
+func inferVendorProvider(model string) string {
+	switch {
+	case schemas.IsAnthropicModel(model):
+		return string(schemas.Anthropic)
+	case schemas.IsOpenAIModel(model):
+		return string(schemas.OpenAI)
+	case schemas.IsGrokModel(model):
+		return string(schemas.XAI)
+	case schemas.IsGeminiModel(model), schemas.IsGemmaModel(model):
+		return string(schemas.Gemini)
+	}
+	if i := strings.IndexAny(model, "-/"); i > 0 {
+		return model[:i]
+	}
+	return ""
+}
+
+// capabilityPreferredModes 是 capability 查找多模式命中时的优先级顺序
+var capabilityPreferredModes = []string{
+	normalizeRequestType(schemas.ChatCompletionRequest),
+	normalizeRequestType(schemas.ResponsesRequest),
+	normalizeRequestType(schemas.TextCompletionRequest),
+}
+
+// crossProviderFallbackUnsafe 为 datasheet 里零行的 provider（自定义代理 provider）跨 provider 兜底选价
+// 请求的 provider 在 datasheet 有行时直接返回 false，标准 provider 缺模型不得继承别家价格
+// 候选先精确模型名后 base model 家族；官方 vendor 优先，其余按 mode 优先 + key 字典序保证确定性
+// 调用方必须持有 s.mu
+func (s *Store) crossProviderFallbackUnsafe(model, baseModel, provider string, modes []string) (*configstoreTables.TableModelPricing, bool) {
+	requestedProvider := normalizeProvider(provider)
+	var exact, family []string
+	for key, pricing := range s.pricingData {
+		if normalizeProvider(pricing.Provider) == requestedProvider {
+			return nil, false
+		}
+		if pricing.Model == model {
+			exact = append(exact, key)
+			continue
+		}
+		if baseModel != "" && s.baseModelNameUnsafe(pricing.Model) == baseModel {
+			family = append(family, key)
+		}
+	}
+	keys := exact
+	if len(keys) == 0 {
+		keys = family
+	}
+	if len(keys) == 0 {
+		return nil, false
+	}
+	if vendor := inferVendorProvider(baseModel); vendor != "" {
+		var narrowed []string
+		for _, key := range keys {
+			if normalizeProvider(s.pricingData[key].Provider) == vendor {
+				narrowed = append(narrowed, key)
+			}
+		}
+		if len(narrowed) > 0 {
+			keys = narrowed
+		}
+	}
+	for _, mode := range modes {
+		var modeKeys []string
+		for _, key := range keys {
+			if parts := strings.SplitN(key, "|", 3); len(parts) == 3 && parts[2] == mode {
+				modeKeys = append(modeKeys, key)
+			}
+		}
+		if len(modeKeys) > 0 {
+			slices.Sort(modeKeys)
+			row := s.pricingData[modeKeys[0]]
+			return &row, true
+		}
+	}
+	slices.Sort(keys)
+	row := s.pricingData[keys[0]]
+	return &row, true
 }
 
 // NewTestStore constructs a minimal Store for unit tests without I/O.
