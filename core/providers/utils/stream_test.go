@@ -294,6 +294,36 @@ func TestAttachBilledUsageFromContext_NoOpWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestAttachBilledUsageFromContext_EstimatesMissingUsage(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptTokens, 10)
+
+	content := "hello"
+	TrackStreamOutputForCancellation(ctx, &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Choices: []schemas.BifrostResponseChoice{{
+				ChatStreamResponseChoice: &schemas.ChatStreamResponseChoice{
+					Delta: &schemas.ChatStreamResponseChoiceDelta{Content: &content},
+				},
+			}},
+		},
+	})
+
+	bifrostErr := &schemas.BifrostError{}
+	attachBilledUsageFromContext(ctx, bifrostErr)
+
+	usage := bifrostErr.ExtraFields.BilledUsage
+	if usage == nil {
+		t.Fatal("expected estimated billed usage")
+	}
+	if usage.PromptTokens != 10 || usage.CompletionTokens != 2 || usage.TotalTokens != 12 {
+		t.Fatalf("unexpected estimated usage: %+v", usage)
+	}
+	if !usage.Estimated {
+		t.Fatal("estimated usage must be marked")
+	}
+}
+
 func TestCheckFirstStreamChunk_CodeOnlyError(t *testing.T) {
 	// Error with code but no message should be treated as an error
 	stream := make(chan *schemas.BifrostStreamChunk, 2)

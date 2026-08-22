@@ -7232,6 +7232,8 @@ func (bifrost *Bifrost) billAbandonedTerminal(req *ChannelMessage, result *schem
 // handleProviderRequest handles the request to the provider based on the request type
 // key is used for single-key operations, keys is used for batch/file operations that need multiple keys
 func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config *schemas.ProviderConfig, req *ChannelMessage, key schemas.Key, keys []schemas.Key) (*schemas.BifrostResponse, *schemas.BifrostError) {
+	// 客户端中断时不等待上游最终 usage，提前保存输入估算供取消计费兜底
+	providerUtils.EstimateStreamPromptTokens(req.Context, &req.BifrostRequest)
 	response := &schemas.BifrostResponse{}
 	switch req.RequestType {
 	case schemas.ListModelsRequest:

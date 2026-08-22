@@ -2699,6 +2699,9 @@ func ProcessAndSendResponse(
 	responseChan chan *schemas.BifrostStreamChunk,
 	postHookSpanFinalizer func(context.Context),
 ) {
+	// 记录已收到的输出字节数，客户端中断且上游未返回 usage 时用于本地估算
+	TrackStreamOutputForCancellation(ctx, response)
+
 	// Accumulate chunk for tracing (common for all providers)
 	if tracer, ok := ctx.Value(schemas.BifrostContextKeyTracer).(schemas.Tracer); ok && tracer != nil {
 		if traceID, ok := ctx.Value(schemas.BifrostContextKeyTraceID).(string); ok && traceID != "" {
@@ -2745,6 +2748,136 @@ func ProcessAndSendResponse(
 			completeDeferredSpan(ctx, processedResponse, processedError, postHookSpanFinalizer)
 		}
 	}
+}
+
+// EstimateStreamPromptTokens stores a conservative local estimate of the input
+// token count for cancellation billing. It intentionally uses serialized request
+// size because the core package does not bundle every provider's tokenizer.
+func EstimateStreamPromptTokens(ctx *schemas.BifrostContext, request *schemas.BifrostRequest) {
+	if ctx == nil || request == nil {
+		return
+	}
+	var payload any
+	switch request.RequestType {
+	case schemas.TextCompletionStreamRequest:
+		payload = request.TextCompletionRequest
+	case schemas.ChatCompletionStreamRequest:
+		payload = request.ChatRequest
+	case schemas.ResponsesStreamRequest:
+		payload = request.ResponsesRequest
+	default:
+		return
+	}
+	body, err := json.Marshal(payload)
+	if err != nil || len(body) == 0 {
+		return
+	}
+	model := requestModel(request)
+	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedModel, model)
+	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptTokens, EstimateTokensByModel(model, string(body)))
+}
+
+// TrackStreamOutputForCancellation keeps only a byte counter in context. The
+// stream-sized text remains in the normal accumulator, while cancellation
+// billing can estimate completion tokens without waiting for a terminal event.
+func TrackStreamOutputForCancellation(ctx *schemas.BifrostContext, response *schemas.BifrostResponse) {
+	if ctx == nil || response == nil {
+		return
+	}
+	text := streamResponseText(response)
+	if text == "" {
+		return
+	}
+	model, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedModel).(string)
+	outputEstimator, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedOutputEstimator).(*streamTokenEstimator)
+	if outputEstimator == nil {
+		outputEstimator = newStreamTokenEstimator(model)
+		ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedOutputEstimator, outputEstimator)
+	}
+	outputEstimator.Add(text)
+}
+
+func requestModel(request *schemas.BifrostRequest) string {
+	switch request.RequestType {
+	case schemas.TextCompletionStreamRequest:
+		if request.TextCompletionRequest != nil {
+			return request.TextCompletionRequest.Model
+		}
+	case schemas.ChatCompletionStreamRequest:
+		if request.ChatRequest != nil {
+			return request.ChatRequest.Model
+		}
+	case schemas.ResponsesStreamRequest:
+		if request.ResponsesRequest != nil {
+			return request.ResponsesRequest.Model
+		}
+	default:
+		break
+	}
+	return ""
+}
+
+func streamResponseText(response *schemas.BifrostResponse) string {
+	var text strings.Builder
+	if response.ChatResponse != nil {
+		for _, choice := range response.ChatResponse.Choices {
+			if choice.ChatStreamResponseChoice != nil && choice.Delta != nil {
+				delta := choice.Delta
+				for _, value := range []*string{delta.Content, delta.Refusal, delta.Reasoning} {
+					if value != nil {
+						text.WriteString(*value)
+					}
+				}
+				for _, call := range delta.ToolCalls {
+					text.WriteString(call.Function.Arguments)
+				}
+			}
+		}
+	}
+	if response.TextCompletionResponse != nil {
+		for _, choice := range response.TextCompletionResponse.Choices {
+			if choice.TextCompletionResponseChoice != nil && choice.Text != nil {
+				text.WriteString(*choice.Text)
+			}
+		}
+	}
+	if response.ResponsesStreamResponse != nil {
+		stream := response.ResponsesStreamResponse
+		if stream.Delta != nil {
+			text.WriteString(*stream.Delta)
+		} else if stream.Text != nil {
+			text.WriteString(*stream.Text)
+		}
+		if stream.Refusal != nil {
+			text.WriteString(*stream.Refusal)
+		}
+		if stream.Arguments != nil {
+			text.WriteString(*stream.Arguments)
+		}
+		if stream.Delta == nil && stream.Text == nil && stream.Part != nil && stream.Part.Text != nil {
+			text.WriteString(*stream.Part.Text)
+		}
+		if stream.Delta == nil && stream.Text == nil && stream.Part == nil && stream.Item != nil && stream.Item.Content != nil {
+			text.WriteString(responseContentText(stream.Item.Content))
+		}
+	}
+	return text.String()
+}
+
+func responseContentText(content *schemas.ResponsesMessageContent) string {
+	if content == nil {
+		return ""
+	}
+	if content.ContentStr != nil {
+		return *content.ContentStr
+	}
+	var text strings.Builder
+	for _, block := range content.ContentBlocks {
+		if block.Text != nil {
+			text.WriteString(*block.Text)
+		}
+	}
+	return text.String()
 }
 
 // ProcessAndSendBifrostError handles post-hook processing and sends the bifrost error to the channel.
@@ -3148,7 +3281,25 @@ func attachBilledUsageFromContext(ctx *schemas.BifrostContext, bifrostErr *schem
 	}
 	usage, ok := ctx.Value(schemas.BifrostContextKeyStreamAccumulatedUsage).(*schemas.BifrostLLMUsage)
 	if !ok || usage == nil {
-		return
+		usage = &schemas.BifrostLLMUsage{}
+	}
+	estimated := false
+	if promptTokens, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedPromptTokens).(int); promptTokens > 0 && usage.PromptTokens == 0 {
+		usage.PromptTokens = promptTokens
+		estimated = true
+	}
+	if outputEstimator, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedOutputEstimator).(*streamTokenEstimator); outputEstimator != nil {
+		if outputTokens := outputEstimator.Tokens(); outputTokens > 0 && usage.CompletionTokens == 0 {
+			usage.CompletionTokens = outputTokens
+			estimated = true
+		}
+	}
+	calculatedTotal := usage.PromptTokens + usage.CompletionTokens
+	if calculatedTotal > usage.TotalTokens {
+		usage.TotalTokens = calculatedTotal
+	}
+	if estimated {
+		usage.Estimated = true
 	}
 	if usage.PromptTokens == 0 &&
 		usage.CompletionTokens == 0 &&

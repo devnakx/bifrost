@@ -1846,6 +1846,7 @@ type BifrostLLMUsage struct {
 	CompletionTokens        int                          `json:"completion_tokens,omitempty"`
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 	TotalTokens             int                          `json:"total_tokens"`
+	Estimated               bool                         `json:"estimated,omitempty"` // true when cancellation billing used local token estimation
 	// SearchUnits is the billable unit for rerank: Cohere and Bedrock both define one unit as
 	// a single query against up to 100 document chunks, so a request over that many chunks
 	// bills as several. Distinct from ChatCompletionTokensDetails.NumSearchQueries, which
