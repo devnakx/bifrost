@@ -1914,6 +1914,35 @@ func HandleOpenAIResponsesStreaming(
 		}
 
 		sseReader := providerUtils.GetSSEDataReader(ctx, reader)
+		usage := &schemas.BifrostLLMUsage{}
+		// 保存已收到的 usage，让客户端取消时仍能结算上游已经消耗的 token
+		ctx.SetValue(schemas.BifrostContextKeyStreamAccumulatedUsage, usage)
+		accumulateUsage := func(candidate *schemas.BifrostLLMUsage) {
+			if candidate == nil {
+				return
+			}
+			if candidate.PromptTokens > usage.PromptTokens {
+				usage.PromptTokens = candidate.PromptTokens
+			}
+			if candidate.CompletionTokens > usage.CompletionTokens {
+				usage.CompletionTokens = candidate.CompletionTokens
+			}
+			if candidate.TotalTokens > usage.TotalTokens {
+				usage.TotalTokens = candidate.TotalTokens
+			}
+			if total := usage.PromptTokens + usage.CompletionTokens; total > usage.TotalTokens {
+				usage.TotalTokens = total
+			}
+			if candidate.PromptTokensDetails != nil {
+				usage.PromptTokensDetails = candidate.PromptTokensDetails
+			}
+			if candidate.CompletionTokensDetails != nil {
+				usage.CompletionTokensDetails = candidate.CompletionTokensDetails
+			}
+			if candidate.Cost != nil {
+				usage.Cost = candidate.Cost
+			}
+		}
 
 		lastChunkTime := startTime
 
@@ -1992,6 +2021,10 @@ func HandleOpenAIResponsesStreaming(
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, providerUtils.EnrichError(ctx, bifrostErr, jsonBody, []byte(jsonData), sendBackRawRequest, sendBackRawResponse, latency), responseChan, logger, postHookSpanFinalizer)
 				return
+			}
+
+			if response.Response != nil {
+				accumulateUsage(response.Response.Usage.ToBifrostLLMUsage())
 			}
 
 			response.ExtraFields.ChunkIndex = response.SequenceNumber
