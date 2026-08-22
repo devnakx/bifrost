@@ -67,3 +67,20 @@ temp/
 # Go workspaces (local only)
 go.work
 go.work.sum
+
+# Local agent and code graph state
+.codegraph/
+.omo/
+.agents/
+.codex/
+.claude/
+
+# Repository areas not needed by Dockerfile.dev
+examples/
+cli/
+cmd/
+scripts/
+terraform/
+helm-charts/
+community/
+recipes/

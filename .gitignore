@@ -10,6 +10,8 @@ private.*
 bifrost-data
 test-coverage-local.sh
 
+.omo/
+
 # Enterprise
 ui/app/enterprise
 ui/components/enterprise

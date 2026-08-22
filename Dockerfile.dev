@@ -1,0 +1,107 @@
+# Dockerfile.dev — 个人自用构建镜像
+# 特点：
+#   - 使用本地模块源码（go.work），不依赖 registry 上已发布的模块版本，代码可任意超前
+#   - 动态链接（无 -extldflags '-static'、无 sqlite_static tag），主程序可运行时 dlopen
+#     -buildmode=plugin 的 .so 插件
+#   - 构建命令：docker build -f Dockerfile.dev -t bifrost:dev .
+
+# --- UI 构建阶段：React + Vite 前端 ---
+FROM node:25-alpine3.23@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS ui-builder
+WORKDIR /app
+
+# 应用 alpine 最新安全补丁
+RUN apk upgrade --no-cache
+
+# 只拷贝依赖清单先行安装，利用构建缓存
+COPY ui/package*.json ./
+RUN npm ci
+
+# 拷贝 UI 源码并构建
+COPY ui/ ./
+RUN npm run build-enterprise
+
+# --- Go 构建阶段：本地 go.work 编译二进制 ---
+FROM golang:1.26.6-alpine3.23@sha256:e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406 AS builder
+WORKDIR /build
+
+# go-sqlite3 需要 CGO，编译器与链接器一并安装
+RUN apk upgrade --no-cache && \
+    apk add --no-cache gcc musl-dev sqlite-dev binutils binutils-gold
+
+# CGO 必须开启（go-sqlite3 驱动），目标平台 linux
+ENV CGO_ENABLED=1 GOOS=linux
+
+# 拷贝全部本地模块（仓库根目录即构建上下文）
+COPY core/ ./core/
+COPY framework/ ./framework/
+COPY plugins/ ./plugins/
+COPY transports/ ./transports/
+
+# 初始化 go workspace，本地源码优先于 registry 版本
+# plugins 子模块用循环自动发现，新增插件模块无需改本文件
+RUN go work init && \
+    go work use ./core && \
+    go work use ./framework && \
+    go work use ./transports && \
+    for d in ./plugins/*/; do [ -f "$d/go.mod" ] && go work use "$d"; done
+
+# 嵌入 UI 产物到 Go 二进制（//go:embed）
+COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
+
+# 动态链接构建：不加 -extldflags '-static'，以便运行时加载 .so 插件
+ARG VERSION=dev
+RUN cd /build/transports && \
+    go build \
+      -ldflags="-w -s -X main.Version=v${VERSION}" \
+      -a -trimpath \
+      -o /app/main \
+      ./bifrost-http
+
+# 校验产物存在，失败即整体失败
+RUN test -f /app/main || (echo "Build failed" && exit 1)
+
+# --- 运行时阶段：最小化 alpine 镜像 ---
+FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+WORKDIR /app
+
+# musl：C 标准库（CGO 二进制必需）
+# libgcc：GCC 运行时库
+# ca-certificates：HTTPS 证书
+# sqlite-libs：动态链接下 go-sqlite3 需要的系统 SQLite 库
+RUN apk upgrade --no-cache && \
+    apk add --no-cache musl libgcc ca-certificates zlib sqlite-libs
+
+COPY --from=builder /app/main .
+COPY --from=builder /build/transports/docker-entrypoint.sh .
+
+# 镜像构建参数，均可通过 --build-arg 覆盖
+ARG ARG_APP_PORT=8080
+ARG ARG_APP_HOST=0.0.0.0
+ARG ARG_LOG_LEVEL=info
+ARG ARG_LOG_STYLE=json
+ARG ARG_APP_DIR=/app/data
+
+ENV APP_PORT=$ARG_APP_PORT \
+    APP_HOST=$ARG_APP_HOST \
+    LOG_LEVEL=$ARG_LOG_LEVEL \
+    LOG_STYLE=$ARG_LOG_STYLE \
+    APP_DIR=$ARG_APP_DIR
+
+# 非 root 运行（UID 1000），数据目录组可写
+RUN mkdir -p "$APP_DIR/logs" && \
+    adduser -D -s /bin/sh appuser && \
+    chown -R appuser:appuser /app && \
+    chown -R appuser:0 "$APP_DIR" && \
+    { [ "$APP_DIR" = "/app" ] || chmod -R g=rwX "$APP_DIR"; } && \
+    chmod +x /app/docker-entrypoint.sh
+USER 1000:0
+
+VOLUME ["${APP_DIR}"]
+EXPOSE $APP_PORT
+
+# 健康检查（busybox wget，探 /health）
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:${APP_PORT}/health || exit 1
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["/app/main"]
