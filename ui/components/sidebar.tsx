@@ -82,8 +82,6 @@ import { useCookies } from "react-cookie";
 import { Badge } from "./ui/badge";
 import { PromoCardStack } from "./ui/promoCardStack";
 
-// Cookie name for dismissing production setup card
-const PRODUCTION_SETUP_DISMISSED_COOKIE = "bifrost_production_setup_dismissed";
 // Closing the "setup checklist incomplete" promo card only snoozes that card
 // for a day — separate from the widget's own hidden/snoozed cookies, so it
 // doesn't affect whether the floating widget itself reappears on next nav.
@@ -110,30 +108,6 @@ const MCPIcon = ({ className }: { className?: string }) => (
 
 // Main navigation items
 
-// Base promotional card (memoized outside component to prevent recreation)
-const productionSetupHelpCard = {
-	id: "production-setup",
-	title: "Need help with production setup?",
-	description: (
-		<>
-			We offer help with production setup including custom integrations and dedicated support.
-			<br />
-			<br />
-			Book a demo with our team{" "}
-			<a
-				href="https://calendly.com/maximai/bifrost-demo?utm_source=bfd_sdbr"
-				target="_blank"
-				className="text-primary font-medium underline"
-				rel="noopener noreferrer"
-			>
-				here
-			</a>
-			.
-		</>
-	),
-	dismissible: true,
-};
-
 // Sidebar item interface
 interface SidebarItem {
 	title: string;
@@ -146,6 +120,7 @@ interface SidebarItem {
 	tag?: string;
 	new?: boolean;
 	isExternal?: boolean;
+	enterpriseOnly?: boolean; // 企业版专属条目，非企业构建隐藏
 	queryParam?: string; // Optional: for tab-based subitems (e.g., "client-settings")
 }
 
@@ -251,14 +226,15 @@ const SidebarItemView = ({
 
 	const isHighlighted = !hasSubItems && highlightedUrl === item.url;
 
-	const buttonClassName = `group/nav-item relative h-7.5 cursor-pointer rounded-sm border px-3 transition-all duration-200 ${isHighlighted
-		? "bg-sidebar-accent text-accent-foreground border-primary/20"
-		: isActive || isAnySubItemActive
-			? "bg-sidebar-accent text-primary border-primary/20"
-			: item.hasAccess
-				? "hover:bg-sidebar-accent hover:text-accent-foreground border-transparent text-slate-500 dark:text-zinc-400"
-				: "hover:bg-destructive/5 hover:text-muted-foreground text-muted-foreground cursor-not-allowed border-transparent"
-		} `;
+	const buttonClassName = `group/nav-item relative h-7.5 cursor-pointer rounded-sm border px-3 transition-all duration-200 ${
+		isHighlighted
+			? "bg-sidebar-accent text-accent-foreground border-primary/20"
+			: isActive || isAnySubItemActive
+				? "bg-sidebar-accent text-primary border-primary/20"
+				: item.hasAccess
+					? "hover:bg-sidebar-accent hover:text-accent-foreground border-transparent text-slate-500 dark:text-zinc-400"
+					: "hover:bg-destructive/5 hover:text-muted-foreground text-muted-foreground cursor-not-allowed border-transparent"
+	} `;
 
 	const innerContent = (
 		<div className="flex w-full items-center justify-between">
@@ -409,14 +385,15 @@ const SidebarItemView = ({
 						const isSubItemActive = subItem.queryParam ? pathname === subItem.url : isRouteMatch(subItem.url);
 						const isSubItemHighlighted = highlightedUrl ? subItemHref.startsWith(highlightedUrl) : false;
 						const SubItemIcon = subItem.icon;
-						const subItemClassName = `h-7 cursor-pointer rounded-sm px-2 transition-all duration-200 ${isSubItemHighlighted
-							? "bg-sidebar-accent text-accent-foreground"
-							: isSubItemActive
-								? "bg-sidebar-accent text-primary font-medium"
-								: subItem.hasAccess === false
-									? "hover:bg-destructive/5 hover:text-muted-foreground text-muted-foreground cursor-not-allowed border-transparent"
-									: "hover:bg-sidebar-accent hover:text-accent-foreground text-slate-500 dark:text-zinc-400"
-							}`;
+						const subItemClassName = `h-7 cursor-pointer rounded-sm px-2 transition-all duration-200 ${
+							isSubItemHighlighted
+								? "bg-sidebar-accent text-accent-foreground"
+								: isSubItemActive
+									? "bg-sidebar-accent text-primary font-medium"
+									: subItem.hasAccess === false
+										? "hover:bg-destructive/5 hover:text-muted-foreground text-muted-foreground cursor-not-allowed border-transparent"
+										: "hover:bg-sidebar-accent hover:text-accent-foreground text-slate-500 dark:text-zinc-400"
+						}`;
 						const subInner = (
 							<div className="flex w-full items-center gap-2">
 								{SubItemIcon && <SubItemIcon className={`h-3.5 w-3.5 ${isSubItemActive ? "text-primary" : "text-muted-foreground"}`} />}
@@ -511,13 +488,7 @@ export default function AppSidebar() {
 	const [searchQuery, setSearchQuery] = useState("");
 	const [focusedIndex, setFocusedIndex] = useState(-1);
 	const searchInputRef = useRef<HTMLInputElement>(null);
-	const [cookies, setCookie, removeCookie] = useCookies([
-		PRODUCTION_SETUP_DISMISSED_COOKIE,
-		HIDDEN_UNTIL_NAV_COOKIE,
-		REMIND_LATER_COOKIE,
-		ONBOARDING_CARD_DISMISSED_COOKIE,
-	]);
-	const isProductionSetupDismissed = !!cookies[PRODUCTION_SETUP_DISMISSED_COOKIE];
+	const [cookies, setCookie, removeCookie] = useCookies([HIDDEN_UNTIL_NAV_COOKIE, REMIND_LATER_COOKIE, ONBOARDING_CARD_DISMISSED_COOKIE]);
 	const isOnboardingCardDismissed = !!cookies[ONBOARDING_CARD_DISMISSED_COOKIE];
 	const { data: latestRelease } = useGetLatestReleaseQuery(undefined, {
 		skip: !mounted, // Only fetch after component is mounted
@@ -595,7 +566,7 @@ export default function AppSidebar() {
 		removeCookie(REMIND_LATER_COOKIE, { path: "/" });
 	}, [removeCookie]);
 
-	const items = useMemo(
+	const items = useMemo<SidebarItem[]>(
 		() => [
 			{
 				title: "Observability",
@@ -689,6 +660,7 @@ export default function AppSidebar() {
 						icon: CircuitBoard,
 						description: "Automatic fallback when primary endpoints fail",
 						hasAccess: hasCircuitBreakerAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Pricing Overrides",
@@ -733,6 +705,7 @@ export default function AppSidebar() {
 						icon: ToolCase,
 						description: "Tool Groups",
 						hasAccess: hasMCPToolGroupsAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Auth Sessions",
@@ -770,6 +743,7 @@ export default function AppSidebar() {
 				icon: Siren,
 				description: "Manage alert channels, rules, and history",
 				hasAccess: hasAlertingAccess,
+				enterpriseOnly: true,
 				subItems: [
 					{
 						title: "Channels",
@@ -814,6 +788,7 @@ export default function AppSidebar() {
 						icon: Users,
 						description: "Manage users",
 						hasAccess: hasUsersAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Teams",
@@ -828,6 +803,7 @@ export default function AppSidebar() {
 						icon: Building2,
 						description: "Manage business units",
 						hasAccess: hasBusinessUnitsAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Customers",
@@ -842,6 +818,7 @@ export default function AppSidebar() {
 						icon: BookUser,
 						description: "User management and provisioning",
 						hasAccess: hasUserProvisioningAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Roles & Permissions",
@@ -849,6 +826,7 @@ export default function AppSidebar() {
 						icon: UserRoundCheck,
 						description: "User roles and permissions",
 						hasAccess: hasRbacAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Access Profiles",
@@ -856,6 +834,7 @@ export default function AppSidebar() {
 						icon: ShieldCheck,
 						description: "Manage access profiles for roles",
 						hasAccess: hasAccessProfilesAccess,
+						enterpriseOnly: true,
 					},
 					{
 						title: "Audit Logs",
@@ -863,6 +842,7 @@ export default function AppSidebar() {
 						icon: ScrollText,
 						description: "Audit logs and compliance",
 						hasAccess: hasAuditLogsAccess,
+						enterpriseOnly: true,
 					},
 				],
 			},
@@ -872,6 +852,7 @@ export default function AppSidebar() {
 				icon: Construction,
 				description: "Guardrails configuration",
 				hasAccess: hasGuardrailsConfigAccess || hasGuardrailsProvidersAccess,
+				enterpriseOnly: true,
 				subItems: [
 					{
 						title: "Rules",
@@ -902,6 +883,7 @@ export default function AppSidebar() {
 				description: "Edge device management",
 				url: "/workspace/edge-control",
 				hasAccess: hasAnyEdgeControlAccess,
+				enterpriseOnly: true,
 				subItems: [
 					{
 						title: "Devices",
@@ -932,6 +914,7 @@ export default function AppSidebar() {
 				icon: Network,
 				description: "Manage Bifrost cluster",
 				hasAccess: hasClusterConfigAccess,
+				enterpriseOnly: true,
 			},
 			{
 				title: "Adaptive Routing",
@@ -939,6 +922,7 @@ export default function AppSidebar() {
 				icon: Shuffle,
 				description: "Manage adaptive routing",
 				hasAccess: isAdaptiveRoutingAllowed,
+				enterpriseOnly: true,
 				subItems: [
 					{
 						title: "Dashboard",
@@ -958,21 +942,21 @@ export default function AppSidebar() {
 			},
 			...(isDbConnected
 				? [
-					{
-						title: "Prompt Repository",
-						url: "/workspace/prompt-repo",
-						icon: FolderGit,
-						description: "Prompt repository",
-						hasAccess: hasPromptRepositoryAccess,
-					},
-					{
-						title: "Skills Repository",
-						url: "/workspace/skills-repo",
-						icon: BookOpenText,
-						description: "Skills repository",
-						hasAccess: hasSkillsRepositoryAccess,
-					},
-				]
+						{
+							title: "Prompt Repository",
+							url: "/workspace/prompt-repo",
+							icon: FolderGit,
+							description: "Prompt repository",
+							hasAccess: hasPromptRepositoryAccess,
+						},
+						{
+							title: "Skills Repository",
+							url: "/workspace/skills-repo",
+							icon: BookOpenText,
+							description: "Skills repository",
+							hasAccess: hasSkillsRepositoryAccess,
+						},
+					]
 				: []),
 			{
 				title: "Evals",
@@ -981,6 +965,7 @@ export default function AppSidebar() {
 				isExternal: true,
 				description: "Evaluations",
 				hasAccess: true,
+				enterpriseOnly: true,
 			},
 			{
 				title: "Settings",
@@ -1019,14 +1004,14 @@ export default function AppSidebar() {
 					},
 					...(IS_ENTERPRISE
 						? [
-							{
-								title: "Proxy",
-								url: "/workspace/config/proxy",
-								icon: Globe,
-								description: "Proxy configuration",
-								hasAccess: hasSettingsAccess,
-							},
-						]
+								{
+									title: "Proxy",
+									url: "/workspace/config/proxy",
+									icon: Globe,
+									description: "Proxy configuration",
+									hasAccess: hasSettingsAccess,
+								},
+							]
 						: []),
 					{
 						title: "API Keys",
@@ -1051,21 +1036,21 @@ export default function AppSidebar() {
 					},
 					...(IS_ENTERPRISE
 						? [
-							{
-								title: "Branding",
-								url: "/workspace/config/branding",
-								icon: Palette,
-								description: "Custom logo and icon",
-								hasAccess: hasSettingsAccess,
-							},
-							{
-								title: "License Info",
-								url: "/workspace/config/license",
-								icon: BadgeInfo,
-								description: "Enterprise license information",
-								hasAccess: hasSettingsAccess,
-							},
-						]
+								{
+									title: "Branding",
+									url: "/workspace/config/branding",
+									icon: Palette,
+									description: "Custom logo and icon",
+									hasAccess: hasSettingsAccess,
+								},
+								{
+									title: "License Info",
+									url: "/workspace/config/license",
+									icon: BadgeInfo,
+									description: "Enterprise license information",
+									hasAccess: hasSettingsAccess,
+								},
+							]
 						: []),
 				],
 			},
@@ -1113,9 +1098,10 @@ export default function AppSidebar() {
 	const accessibleItems: SidebarItem[] = useMemo(() => {
 		return items
 			.map((item) => {
+				if (!IS_ENTERPRISE && item.enterpriseOnly) return null;
 				const hadSubItems = !!item.subItems?.length;
 				if (hadSubItems) {
-					const visibleSubItems = item.subItems!.filter((sub) => sub.hasAccess !== false);
+					const visibleSubItems = item.subItems!.filter((sub) => sub.hasAccess !== false && !(!IS_ENTERPRISE && sub.enterpriseOnly));
 					if (visibleSubItems.length === 0) return null;
 					return { ...item, subItems: visibleSubItems, hasAccess: true };
 				}
@@ -1388,18 +1374,12 @@ export default function AppSidebar() {
 				dismissible: true,
 			});
 		}
-		// Only show after mounted to ensure cookie is properly hydrated and avoid flash
-		if (!IS_ENTERPRISE && mounted && !isProductionSetupDismissed) {
-			cards.push(productionSetupHelpCard);
-		}
 		return cards;
 	}, [
 		coreConfig?.restart_required,
 		showNewReleaseBanner,
 		latestRelease,
 		newReleaseImage,
-		isProductionSetupDismissed,
-		mounted,
 		showOnboardingResumeCard,
 		onboardingSteps.length,
 		onboardingDoneCount,
@@ -1408,14 +1388,6 @@ export default function AppSidebar() {
 
 	const handlePromoDismiss = useCallback(
 		(cardId: string) => {
-			if (cardId === "production-setup") {
-				const expiryDate = new Date();
-				expiryDate.setDate(expiryDate.getDate() + 7);
-				setCookie(PRODUCTION_SETUP_DISMISSED_COOKIE, "true", {
-					path: "/",
-					expires: expiryDate,
-				});
-			}
 			if (cardId === "onboarding-incomplete") {
 				// If the widget itself is snoozed via "Remind me later", align the
 				// card's dismissal to that same date — otherwise the card would
@@ -1483,8 +1455,8 @@ export default function AppSidebar() {
 					</div>
 				</div>
 			)}
-			<div className="ml-2 mr-3 pb-1 group-data-[collapsible=icon]:hidden">
-				<div className="dark:bg-card relative bg-white rounded-sm">
+			<div className="mr-3 ml-2 pb-1 group-data-[collapsible=icon]:hidden">
+				<div className="dark:bg-card relative rounded-sm bg-white">
 					<Search className="text-muted-foreground absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2" />
 					<input
 						ref={searchInputRef}
