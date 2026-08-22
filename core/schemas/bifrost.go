@@ -387,8 +387,9 @@ const (
 	BifrostContextKeyDeferredUsage                       BifrostContextKey = "bifrost-deferred-usage"                     // chan *BifrostLLMUsage (set by provider Phase B — delivers usage after response streaming completes)
 	BifrostContextKeyStreamAccumulatedUsage              BifrostContextKey = "bifrost-stream-accumulated-usage"           // *BifrostLLMUsage handle, set ONCE by a streaming provider and mutated in place as usage arrives; read on cancel/timeout to bill partial usage that the provider already consumed
 	BifrostContextKeyStreamEstimatedPromptTokens         BifrostContextKey = "bifrost-stream-estimated-prompt-tokens"     // int (set by bifrost before provider dispatch for local cancellation billing)
-	BifrostContextKeyStreamEstimatedOutputEstimator      BifrostContextKey = "bifrost-stream-estimated-output-estimator" // small mutable handle for local cancellation billing
-	BifrostContextKeyStreamEstimatedModel                BifrostContextKey = "bifrost-stream-estimated-model"            // string (model used by the local cancellation estimator)
+	BifrostContextKeyStreamEstimatedPromptDetails        BifrostContextKey = "bifrost-stream-estimated-prompt-details"    // *ChatPromptTokensDetails (local cancellation billing breakdown)
+	BifrostContextKeyStreamEstimatedOutputEstimator      BifrostContextKey = "bifrost-stream-estimated-output-estimator"  // small mutable handle for local cancellation billing
+	BifrostContextKeyStreamEstimatedModel                BifrostContextKey = "bifrost-stream-estimated-model"             // string (model used by the local cancellation estimator)
 	BifrostContextKeyDeferredLargePayloadMetadata        BifrostContextKey = "bifrost-deferred-large-payload-metadata"    // <-chan *LargePayloadMetadata (set by enterprise Phase B request — delivers metadata after body streaming)
 	BifrostContextKeySSEReaderFactory                    BifrostContextKey = "bifrost-sse-reader-factory"                 // *providerUtils.SSEReaderFactory (set by enterprise — replaces default bufio.Scanner SSE readers with streaming readers)
 	BifrostContextKeySessionID                           BifrostContextKey = "bifrost-session-id"                         // string session ID for the request (session stickiness)

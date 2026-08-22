@@ -226,6 +226,9 @@ func Init(ctx context.Context, config schemas.BifrostConfig) (*Bifrost, error) {
 		config.Logger = NewDefaultLogger(schemas.LogLevelInfo)
 	}
 	providerUtils.SetLogger(config.Logger)
+	if err := providerUtils.InitializeTokenizers(); err != nil {
+		config.Logger.Warn("failed to initialize tokenizers, token estimation will use fallback rules: %v", err)
+	}
 
 	// Initialize tracer (use NoOpTracer if not provided)
 	tracer := config.Tracer
@@ -7021,6 +7024,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 				// 仅为文本类流式请求初始化本地估算，图片、音频等请求使用各自的计费模型
 				// 每次 attempt 都重新初始化，避免 fallback 沿用上一次模型的估算状态
 				req.Context.SetValue(schemas.BifrostContextKeyStreamEstimatedOutputEstimator, nil)
+				req.Context.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptDetails, nil)
 				req.Context.SetValue(schemas.BifrostContextKeyStreamAccumulatedUsage, nil)
 				providerUtils.EstimateStreamPromptTokens(req.Context, &req.BifrostRequest)
 				// Snapshot per-attempt so postHookRunner doesn't observe a later retry's

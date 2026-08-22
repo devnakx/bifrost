@@ -1797,11 +1797,11 @@ export function LogDetailView({
 									.map(([key, value]) => <LogEntryDetailsView key={key} className="w-full" label={key} value={value} />)}
 						</div>
 					</div>
-					{log.status === "success" && !isContainer && !isPassthrough && (
+					{(log.status === "success" || log.token_usage != null || log.cost != null) && !isContainer && !isPassthrough && (
 						<>
 							<DottedSeparator />
 							<div className="space-y-4">
-								<BlockHeader title="Tokens" />
+								<BlockHeader title={log.token_usage?.estimated ? "Tokens（estimated）" : "Tokens"} />
 								<div className="grid w-full grid-cols-1 items-center justify-between gap-4 md:grid-cols-3">
 									<LogEntryDetailsView className="w-full" label="Input Tokens" value={log.token_usage?.prompt_tokens || "-"} />
 									<LogEntryDetailsView className="w-full" label="Output Tokens" value={log.token_usage?.completion_tokens || "-"} />

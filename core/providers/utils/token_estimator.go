@@ -1,9 +1,12 @@
 package utils
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"unicode"
+
+	tiktoken "github.com/pkoukk/tiktoken-go"
 )
 
 type estimatedTokenProvider int
@@ -80,10 +83,49 @@ func EstimateTokensByModel(model, text string) int {
 	if text == "" {
 		return 0
 	}
+	if tokens, ok := estimateOpenAITokens(model, text); ok {
+		return tokens
+	}
 
 	m := multipliersForModel(model)
 	count, _ := addEstimatedTokenText(m, 0, wordTypeNone, text)
 	return int(math.Ceil(count))
+}
+
+// InitializeTokenizers 在 Bifrost 启动阶段加载 OpenAI tokenizer 词表
+func InitializeTokenizers() error {
+	if _, err := tiktoken.GetEncoding(tiktoken.MODEL_O200K_BASE); err != nil {
+		return fmt.Errorf("initialize o200k_base tokenizer: %w", err)
+	}
+	if _, err := tiktoken.GetEncoding(tiktoken.MODEL_CL100K_BASE); err != nil {
+		return fmt.Errorf("initialize cl100k_base tokenizer: %w", err)
+	}
+	return nil
+}
+
+// estimateOpenAITokens 优先使用真实 tokenizer，未知的 GPT/O 系列模型回退到 o200k
+func estimateOpenAITokens(model, text string) (int, bool) {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(lower, "gemini") || strings.Contains(lower, "claude") || text == "" {
+		return 0, false
+	}
+	encoding, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		isO200KModel := strings.HasPrefix(lower, "gpt-4o") ||
+			strings.HasPrefix(lower, "gpt-4.1") ||
+			strings.HasPrefix(lower, "gpt-5") ||
+			strings.HasPrefix(lower, "o1") ||
+			strings.HasPrefix(lower, "o3") ||
+			strings.HasPrefix(lower, "o4")
+		if !isO200KModel {
+			return 0, false
+		}
+		encoding, err = tiktoken.GetEncoding(tiktoken.MODEL_O200K_BASE)
+	}
+	if err != nil {
+		return 0, false
+	}
+	return len(encoding.Encode(text, nil, nil)), true
 }
 
 func multipliersForModel(model string) estimatedTokenMultipliers {

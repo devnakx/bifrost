@@ -2757,24 +2757,18 @@ func EstimateStreamPromptTokens(ctx *schemas.BifrostContext, request *schemas.Bi
 	if ctx == nil || request == nil {
 		return
 	}
-	var payload any
-	switch request.RequestType {
-	case schemas.TextCompletionStreamRequest:
-		payload = request.TextCompletionRequest
-	case schemas.ChatCompletionStreamRequest:
-		payload = request.ChatRequest
-	case schemas.ResponsesStreamRequest:
-		payload = request.ResponsesRequest
-	default:
-		return
-	}
-	body, err := json.Marshal(payload)
-	if err != nil || len(body) == 0 {
+	estimate := estimateStreamPromptUsage(request)
+	if estimate == nil || estimate.promptTokens <= 0 {
 		return
 	}
 	model := requestModel(request)
 	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedModel, model)
-	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptTokens, EstimateTokensByModel(model, string(body)))
+	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptTokens, estimate.promptTokens)
+	ctx.SetValue(schemas.BifrostContextKeyStreamEstimatedPromptDetails, &schemas.ChatPromptTokensDetails{
+		TextTokens:  estimate.textTokens,
+		ImageTokens: estimate.imageTokens,
+		AudioTokens: estimate.audioTokens,
+	})
 }
 
 // TrackStreamOutputForCancellation keeps only a byte counter in context. The
@@ -3286,6 +3280,11 @@ func attachBilledUsageFromContext(ctx *schemas.BifrostContext, bifrostErr *schem
 	estimated := false
 	if promptTokens, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedPromptTokens).(int); promptTokens > 0 && usage.PromptTokens == 0 {
 		usage.PromptTokens = promptTokens
+		estimated = true
+	}
+	if details, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedPromptDetails).(*schemas.ChatPromptTokensDetails); details != nil && usage.PromptTokensDetails == nil {
+		detailsCopy := *details
+		usage.PromptTokensDetails = &detailsCopy
 		estimated = true
 	}
 	if outputEstimator, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedOutputEstimator).(*streamTokenEstimator); outputEstimator != nil {

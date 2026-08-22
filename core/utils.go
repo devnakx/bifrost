@@ -358,6 +358,7 @@ func clearCtxForFallback(ctx *schemas.BifrostContext) {
 	ctx.ClearValue(schemas.BifrostContextKeyConnectionClosed)
 	ctx.ClearValue(schemas.BifrostContextKeySupportsAssistantPrefill)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamEstimatedPromptTokens)
+	ctx.ClearValue(schemas.BifrostContextKeyStreamEstimatedPromptDetails)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamEstimatedOutputEstimator)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamEstimatedModel)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamAccumulatedUsage)
