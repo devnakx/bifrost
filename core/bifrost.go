@@ -7018,6 +7018,11 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					req.Context.SetValue(schemas.BifrostContextKeyResolvedAlias, nil)
 				}
 				req.SetModel(resolvedModel)
+				// 仅为文本类流式请求初始化本地估算，图片、音频等请求使用各自的计费模型
+				// 每次 attempt 都重新初始化，避免 fallback 沿用上一次模型的估算状态
+				req.Context.SetValue(schemas.BifrostContextKeyStreamEstimatedOutputEstimator, nil)
+				req.Context.SetValue(schemas.BifrostContextKeyStreamAccumulatedUsage, nil)
+				providerUtils.EstimateStreamPromptTokens(req.Context, &req.BifrostRequest)
 				// Snapshot per-attempt so postHookRunner doesn't observe a later retry's
 				// alias while this attempt's provider goroutine is still emitting chunks.
 				attemptResolvedModel := resolvedModel
@@ -7232,8 +7237,6 @@ func (bifrost *Bifrost) billAbandonedTerminal(req *ChannelMessage, result *schem
 // handleProviderRequest handles the request to the provider based on the request type
 // key is used for single-key operations, keys is used for batch/file operations that need multiple keys
 func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config *schemas.ProviderConfig, req *ChannelMessage, key schemas.Key, keys []schemas.Key) (*schemas.BifrostResponse, *schemas.BifrostError) {
-	// 客户端中断时不等待上游最终 usage，提前保存输入估算供取消计费兜底
-	providerUtils.EstimateStreamPromptTokens(req.Context, &req.BifrostRequest)
 	response := &schemas.BifrostResponse{}
 	switch req.RequestType {
 	case schemas.ListModelsRequest:

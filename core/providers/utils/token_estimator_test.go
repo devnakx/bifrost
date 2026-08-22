@@ -1,6 +1,10 @@
 package utils
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
 
 func TestEstimateTokensByModelUsesProviderWeights(t *testing.T) {
 	tests := []struct {
@@ -32,5 +36,18 @@ func TestStreamTokenEstimatorPreservesWordBoundaryAcrossChunks(t *testing.T) {
 
 	if got := estimator.Tokens(); got != whole {
 		t.Fatalf("stream estimate = %d, whole estimate = %d", got, whole)
+	}
+}
+
+func TestEstimateStreamPromptTokensIgnoresNonTextStreams(t *testing.T) {
+	ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+	request := &schemas.BifrostRequest{
+		RequestType: schemas.ImageGenerationStreamRequest,
+	}
+
+	EstimateStreamPromptTokens(ctx, request)
+
+	if got := ctx.Value(schemas.BifrostContextKeyStreamEstimatedPromptTokens); got != nil {
+		t.Fatalf("image stream should not receive token estimate, got %v", got)
 	}
 }
