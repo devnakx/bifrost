@@ -109,6 +109,28 @@ func estimateStreamPromptUsage(request *schemas.BifrostRequest) *streamPromptEst
 		for _, message := range request.ResponsesRequest.Input {
 			messageCount++
 			appendText(pointerString(message.Role))
+			// 工具调用与输出项没有 Content，必须在 Content 判空之前计数
+			if tool := message.ResponsesToolMessage; tool != nil {
+				appendToolText(pointerString(tool.Name))
+				appendToolText(pointerString(tool.Arguments))
+				if tool.Output != nil {
+					appendText(pointerString(tool.Output.ResponsesToolCallOutputStr))
+					for _, block := range tool.Output.ResponsesFunctionToolCallOutputBlocks {
+						appendText(string(block.Type))
+						appendText(pointerString(block.Text))
+					}
+				}
+			}
+			// reasoning 回放：summary 按文本计，encrypted_content 按 base64 串自身的 token 数计
+			if reasoning := message.ResponsesReasoning; reasoning != nil {
+				for _, summary := range reasoning.Summary {
+					appendText(summary.Text)
+				}
+				appendText(pointerString(reasoning.EncryptedContent))
+			}
+			// codex 原样保留的 tool_search/additional_tools 项：计导出的原始工具声明
+			appendToolText(string(message.ToolSearchOutputTools))
+			appendToolText(string(message.AdditionalTools))
 			if message.Content == nil {
 				continue
 			}

@@ -308,7 +308,7 @@ func (provider *OpenAIProvider) ResponsesRetrieveStream(ctx *schemas.BifrostCont
 
 			var response schemas.BifrostResponsesStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				provider.logger.Warn("Failed to parse stream response: %v", err)
+				logStreamParseFailure(provider.logger, ctx.Err(), err)
 				continue
 			}
 

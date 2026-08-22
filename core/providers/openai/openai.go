@@ -597,10 +597,20 @@ func HandleOpenAITextCompletionStreaming(
 		var created int
 		lastChunkTime := startTime
 
+		var drainDeadline time.Time
 		for {
-			// If context was cancelled/timed out, let defer handle it
+			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
 			if ctx.Err() != nil {
-				return
+				if drainDeadline.IsZero() {
+					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
+						drainDeadline = time.Now().Add(grace)
+					} else {
+						return
+					}
+				}
+				if time.Now().After(drainDeadline) {
+					return
+				}
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -648,7 +658,7 @@ func HandleOpenAITextCompletionStreaming(
 
 				// Parse into bifrost response
 				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logger.Warn("Failed to parse stream response: %v", err)
+					logStreamParseFailure(logger, ctx.Err(), err)
 					continue
 				}
 			}
@@ -692,6 +702,14 @@ func HandleOpenAITextCompletionStreaming(
 					usage.PromptTokensDetails = response.Usage.PromptTokensDetails
 				}
 				response.Usage = nil
+			}
+
+			// drain 窗口：usage 已并入句柄，见到 finish_reason 即退出按真实值结算
+			if ctx.Err() != nil {
+				if len(response.Choices) > 0 && response.Choices[0].FinishReason != nil && *response.Choices[0].FinishReason != "" {
+					return
+				}
+				continue
 			}
 
 			// Skip empty responses or responses without choices
@@ -1227,10 +1245,20 @@ func HandleOpenAIChatCompletionStreaming(
 		// instead of a silent stream close.
 		fallbackFinishReasonSeen := false
 
+		var drainDeadline time.Time
 		for {
-			// If context was cancelled/timed out, let defer handle it
+			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
 			if ctx.Err() != nil {
-				return
+				if drainDeadline.IsZero() {
+					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
+						drainDeadline = time.Now().Add(grace)
+					} else {
+						return
+					}
+				}
+				if time.Now().After(drainDeadline) {
+					return
+				}
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -1277,7 +1305,7 @@ func HandleOpenAIChatCompletionStreaming(
 				}
 			} else {
 				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logger.Warn("Failed to parse stream response: %v", err)
+					logStreamParseFailure(logger, ctx.Err(), err)
 					continue
 				}
 			}
@@ -1285,6 +1313,15 @@ func HandleOpenAIChatCompletionStreaming(
 			// choices be array if nil
 			if response.Choices == nil {
 				response.Choices = []schemas.BifrostResponseChoice{}
+			}
+
+			// drain 窗口：只提取 usage 与结束标记，终止即退出按真实值结算
+			if ctx.Err() != nil {
+				providerUtils.AccumulateLLMUsage(usage, response.Usage)
+				if len(response.Choices) > 0 && response.Choices[0].FinishReason != nil && *response.Choices[0].FinishReason != "" {
+					return
+				}
+				continue
 			}
 
 			if isResponsesToChatCompletionsFallback {
@@ -1946,10 +1983,20 @@ func HandleOpenAIResponsesStreaming(
 
 		lastChunkTime := startTime
 
+		var drainDeadline time.Time
 		for {
-			// If context was cancelled/timed out, let defer handle it
+			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
 			if ctx.Err() != nil {
-				return
+				if drainDeadline.IsZero() {
+					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
+						drainDeadline = time.Now().Add(grace)
+					} else {
+						return
+					}
+				}
+				if time.Now().After(drainDeadline) {
+					return
+				}
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -1989,7 +2036,7 @@ func HandleOpenAIResponsesStreaming(
 				}
 			} else {
 				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logger.Warn("Failed to parse stream response: %v", err)
+					logStreamParseFailure(logger, ctx.Err(), err)
 					continue
 				}
 
@@ -2004,6 +2051,19 @@ func HandleOpenAIResponsesStreaming(
 				if sendBackRawResponse {
 					response.ExtraFields.RawResponse = jsonData
 				}
+			}
+
+			// drain 窗口：只提取 usage，终止事件即退出按真实值结算
+			if ctx.Err() != nil {
+				if response.Response != nil {
+					accumulateUsage(response.Response.Usage.ToBifrostLLMUsage())
+				}
+				switch response.Type {
+				case schemas.ResponsesStreamResponseTypeCompleted, schemas.ResponsesStreamResponseTypeIncomplete,
+					schemas.ResponsesStreamResponseTypeError, schemas.ResponsesStreamResponseTypeFailed:
+					return
+				}
+				continue
 			}
 
 			if response.Type == schemas.ResponsesStreamResponseTypeError {
@@ -2592,7 +2652,7 @@ func HandleOpenAISpeechStreamRequest(
 			// Parse into bifrost response
 			var response schemas.BifrostSpeechStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logger.Warn("Failed to parse stream response: %v", err)
+				logStreamParseFailure(logger, ctx.Err(), err)
 				continue
 			}
 
@@ -3115,7 +3175,7 @@ func HandleOpenAITranscriptionStreamRequest(
 				}
 
 				if err := sonic.UnmarshalString(jsonData, response); err != nil {
-					logger.Warn("Failed to parse stream response: %v", err)
+					logStreamParseFailure(logger, ctx.Err(), err)
 					continue
 
 				}
@@ -3563,7 +3623,7 @@ func HandleOpenAIImageGenerationStreaming(
 			// Parse minimally to extract usage and check for errors
 			var response OpenAIImageStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logger.Warn("Failed to parse stream response: %v", err)
+				logStreamParseFailure(logger, ctx.Err(), err)
 				continue
 			}
 
@@ -5169,7 +5229,7 @@ func HandleOpenAIImageEditStreamRequest(
 			// Parse minimally to extract usage and check for errors
 			var response OpenAIImageStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logger.Warn("Failed to parse stream response: %v", err)
+				logStreamParseFailure(logger, ctx.Err(), err)
 				continue
 			}
 

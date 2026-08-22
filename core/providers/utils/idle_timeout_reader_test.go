@@ -555,6 +555,8 @@ func TestSetupStreamCancellation_NoPanicOnCancelledContext(t *testing.T) {
 	body := newSyncedPanicBody()
 	goCtx, cancel := context.WithCancel(context.Background())
 	bifrostCtx := schemas.NewBifrostContext(goCtx, time.Time{})
+	// 本测试钉即时关闭的顺序不变量，grace 设 0 走旧行为
+	bifrostCtx.SetValue(schemas.BifrostContextKeyStreamCancellationGrace, time.Duration(0))
 
 	reader, cleanupReader := NewIdleTimeoutReader(body, body, time.Minute, bifrostCtx)
 	// Defers run LIFO: allowReturn first, then stopCancel, then cleanupReader.
@@ -597,6 +599,34 @@ func TestSetupStreamCancellation_NoPanicOnCancelledContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("Read goroutine did not unblock after context cancellation")
+	}
+}
+
+// 取消后 grace 窗口内不得关闭上游 body（读循环还要读终止事件结算真实 usage），
+// 窗口结束后才关闭且只关闭一次。
+func TestSetupStreamCancellation_GraceDelaysClose(t *testing.T) {
+	t.Parallel()
+
+	body := &countingStreamCloser{}
+	goCtx, cancel := context.WithCancel(context.Background())
+	bifrostCtx := schemas.NewBifrostContext(goCtx, time.Time{})
+	bifrostCtx.SetValue(schemas.BifrostContextKeyStreamCancellationGrace, 200*time.Millisecond)
+
+	stopCancel := SetupStreamCancellation(bifrostCtx, body, getLogger())
+	defer stopCancel()
+
+	cancel()
+
+	time.Sleep(50 * time.Millisecond)
+	if body.closeCount.Load() != 0 {
+		t.Fatal("body closed before grace window elapsed")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for body.closeCount.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := body.closeCount.Load(); got != 1 {
+		t.Fatalf("body close count after grace = %d, want 1", got)
 	}
 }
 

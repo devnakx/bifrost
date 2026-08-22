@@ -53,6 +53,70 @@ func TestEstimateStreamPromptTokensIgnoresNonTextStreams(t *testing.T) {
 	}
 }
 
+func TestEstimateStreamPromptTokensCountsToolAndReasoningReplay(t *testing.T) {
+	model := "gpt-5.6-luna"
+	role := schemas.ResponsesInputMessageRoleUser
+	estimate := func(req *schemas.BifrostRequest) int {
+		ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+		EstimateStreamPromptTokens(ctx, req)
+		got, _ := ctx.Value(schemas.BifrostContextKeyStreamEstimatedPromptTokens).(int)
+		return got
+	}
+	build := func(extra ...schemas.ResponsesMessage) *schemas.BifrostRequest {
+		input := []schemas.ResponsesMessage{{
+			Role:    &role,
+			Content: &schemas.ResponsesMessageContent{ContentStr: ptr("hello")},
+		}}
+		input = append(input, extra...)
+		return &schemas.BifrostRequest{
+			RequestType: schemas.ResponsesStreamRequest,
+			ResponsesRequest: &schemas.BifrostResponsesRequest{
+				Model: model,
+				Input: input,
+			},
+		}
+	}
+
+	outputText := strings.Repeat("tokenized tool output ", 200)
+	call := schemas.ResponsesMessage{
+		Type: ptr(schemas.ResponsesMessageTypeFunctionCall),
+		ResponsesToolMessage: &schemas.ResponsesToolMessage{
+			Name:      ptr("shell"),
+			Arguments: ptr(`{"command":"ls -la","workdir":"/tmp"}`),
+		},
+	}
+	output := schemas.ResponsesMessage{
+		Type: ptr(schemas.ResponsesMessageTypeFunctionCallOutput),
+		ResponsesToolMessage: &schemas.ResponsesToolMessage{
+			Output: &schemas.ResponsesToolMessageOutputStruct{ResponsesToolCallOutputStr: &outputText},
+		},
+	}
+	reasoning := schemas.ResponsesMessage{
+		Type: ptr(schemas.ResponsesMessageTypeReasoning),
+		ResponsesReasoning: &schemas.ResponsesReasoning{
+			Summary: []schemas.ResponsesReasoningSummary{{
+				Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+				Text: "thinking hard about the tool result",
+			}},
+			EncryptedContent: ptr("gAAAAAB" + strings.Repeat("qiUZ0vypxGjo86Zi_", 300)),
+		},
+	}
+
+	baseline := estimate(build())
+	withReplay := estimate(build(call, output, reasoning))
+
+	if withReplay <= baseline {
+		t.Fatalf("replay items not counted: baseline=%d withReplay=%d", baseline, withReplay)
+	}
+	// 工具输出是纯文本，回放的估算增量至少要覆盖它单独估算量的八成
+	minDiff := EstimateTokensByModel(model, outputText) * 4 / 5
+	if diff := withReplay - baseline; diff < minDiff {
+		t.Fatalf("replay contribution too small: diff=%d want>=%d (baseline=%d withReplay=%d)", diff, minDiff, baseline, withReplay)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func TestEstimateStreamPromptTokensDoesNotCountImagePayloadAsText(t *testing.T) {
 	image := strings.Repeat("A", 400_000)
 	imageType := schemas.ResponsesInputMessageContentBlockTypeImage

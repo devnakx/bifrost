@@ -246,3 +246,12 @@ func SanitizeUserField(user *string) *string {
 	}
 	return user
 }
+
+// logStreamParseFailure 客户端取消导致流中断时，半行 JSON 解析失败属预期噪音，降级为 Debug；其余情况保持 Warn
+func logStreamParseFailure(logger schemas.Logger, ctxErr error, err error) {
+	if ctxErr != nil {
+		logger.Debug("Failed to parse stream response: %v", err)
+		return
+	}
+	logger.Warn("Failed to parse stream response: %v", err)
+}

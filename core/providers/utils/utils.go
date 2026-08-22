@@ -2972,52 +2972,40 @@ func SetupStreamCancellation(ctx *schemas.BifrostContext, bodyStream io.Reader, 
 		defer close(closed)
 		select {
 		case <-ctx.Done():
-			// Atomically claim the close. Only one owner (this goroutine, the
-			// idle-timeout timer, or ReleaseStreamingResponse) may close the
-			// non-idempotent fasthttp body stream: a second CloseWithError
-			// re-runs releaseRequestStream, double-Putting the pooled
-			// requestStream so a later request aliases it concurrently and
-			// panics with a negative chunkLeft slice bound. GetAndSetValue is a
-			// single locked compare-and-swap, unlike the previous racy
-			// Value-then-SetValue check.
-			if prev, _ := ctx.GetAndSetValue(schemas.BifrostContextKeyConnectionClosed, true).(bool); prev {
+		case <-done:
+			// 正常结束且无取消：不关闭 body
+			if ctx.Err() == nil {
 				return
 			}
-			// Context cancelled or deadline exceeded - close the body stream to unblock reads
-			if closer, ok := bodyStream.(io.Closer); ok {
-				if err := closer.Close(); err != nil {
-					getLogger().Debug(fmt.Sprintf("Error closing body stream on context done: %v", err))
-				}
-			} else if wce, ok := bodyStream.(streamCloserWithError); ok {
-				if err := wce.CloseWithError(ctx.Err()); err != nil {
-					getLogger().Debug(fmt.Sprintf("Error closing body stream on context done: %v", err))
-				}
-			}
-		case <-done:
-			// Race between done and ctx.Done: the streaming goroutine has reached its defer
-			// chain (Read has returned), and ctx is also cancelled. The body may already be
-			// at EOF and fasthttp may have released the underlying conn to the idle pool.
-			// We still attempt a close to unblock any pending drain in ReleaseStreamingResponse,
-			// but we set BifrostContextKeyConnectionClosed unconditionally (matching the
-			// ctx.Done branch above) so ReleaseStreamingResponse skips a second CloseWithError.
-			// A second close against an already-pooled conn nil-derefs in fasthttp's connsCleaner.
-			if ctx.Err() != nil {
-				// Same atomic claim as the ctx.Done branch: skip if another
-				// owner already closed/released the stream.
-				if prev, _ := ctx.GetAndSetValue(schemas.BifrostContextKeyConnectionClosed, true).(bool); prev {
-					return
-				}
-				if closer, ok := bodyStream.(io.Closer); ok {
-					if err := closer.Close(); err != nil {
-						getLogger().Debug(fmt.Sprintf("Error closing body stream on done with cancelled context: %v", err))
-					}
-				} else if wce, ok := bodyStream.(streamCloserWithError); ok {
-					if err := wce.CloseWithError(ctx.Err()); err != nil {
-						getLogger().Debug(fmt.Sprintf("Error closing body stream on done with cancelled context: %v", err))
-					}
-				}
+		}
+		// ctx 已取消：grace 窗口内读循环继续读上游终止事件以结算真实 usage，
+		// 窗口结束或读循环已退出后再关闭 body 解除阻塞
+		if grace := GetStreamCancellationGrace(ctx); grace > 0 {
+			timer := time.NewTimer(grace)
+			select {
+			case <-done:
+				timer.Stop()
+			case <-timer.C:
 			}
 		}
+		// Atomically claim the close. Only one owner (this goroutine, the
+		// idle-timeout timer, or ReleaseStreamingResponse) may close the
+		// non-idempotent fasthttp body stream: a second CloseWithError
+		// re-runs releaseRequestStream, double-Putting the pooled
+		// requestStream so a later request aliases it concurrently and
+		// panics with a negative chunkLeft slice bound. GetAndSetValue is a
+		// single locked compare-and-swap, unlike the previous racy
+		// Value-then-SetValue check.
+		if prev, _ := ctx.GetAndSetValue(schemas.BifrostContextKeyConnectionClosed, true).(bool); prev {
+			return
+		}
+		// Race between done and ctx.Done: the streaming goroutine may already
+		// be at EOF with the conn released to the idle pool; closeBodyStream
+		// still unblocks any pending drain in ReleaseStreamingResponse, and
+		// the claim above makes a second CloseWithError impossible (a second
+		// close against an already-pooled conn nil-derefs in fasthttp's
+		// connsCleaner).
+		closeBodyStream(bodyStream, ctx.Err())
 	}()
 	return func() {
 		close(done)
@@ -3051,6 +3039,48 @@ func GetStreamIdleTimeout(ctx *schemas.BifrostContext) time.Duration {
 		return timeout
 	}
 	return DefaultStreamIdleTimeout
+}
+
+// DefaultStreamCancellationGrace 是客户端取消后继续读上游的默认窗口：
+// 中转商通常在客户端断开后仍会完成生成并下发带 usage 的终止事件，
+// 窗口内读到它即可按真实值结算取消请求，而不是回退本地估算。
+const DefaultStreamCancellationGrace = 60 * time.Second
+
+// GetStreamCancellationGrace 读取取消 drain 窗口；显式设置 0 表示取消即断开（旧行为）。
+func GetStreamCancellationGrace(ctx *schemas.BifrostContext) time.Duration {
+	if grace, ok := ctx.Value(schemas.BifrostContextKeyStreamCancellationGrace).(time.Duration); ok {
+		return grace
+	}
+	return DefaultStreamCancellationGrace
+}
+
+// AccumulateLLMUsage 将 src 的计数按最大值并入 dst，
+// 与各流式循环的 usage 合并规则一致，供取消 drain 窗口复用。
+func AccumulateLLMUsage(dst, src *schemas.BifrostLLMUsage) {
+	if dst == nil || src == nil {
+		return
+	}
+	if src.PromptTokens > dst.PromptTokens {
+		dst.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens > dst.CompletionTokens {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.TotalTokens > dst.TotalTokens {
+		dst.TotalTokens = src.TotalTokens
+	}
+	if total := dst.PromptTokens + dst.CompletionTokens; total > dst.TotalTokens {
+		dst.TotalTokens = total
+	}
+	if src.PromptTokensDetails != nil {
+		dst.PromptTokensDetails = src.PromptTokensDetails
+	}
+	if src.CompletionTokensDetails != nil {
+		dst.CompletionTokensDetails = src.CompletionTokensDetails
+	}
+	if src.Cost != nil {
+		dst.Cost = src.Cost
+	}
 }
 
 // streamCloserWithError is implemented by fasthttp's streaming body reader.
