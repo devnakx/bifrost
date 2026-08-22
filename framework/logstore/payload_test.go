@@ -133,6 +133,74 @@ func TestBuildInputContentSummary(t *testing.T) {
 	assert.NotContains(t, summary, "It's sunny", "BuildInputContentSummary should not include output")
 }
 
+func TestTrimListPayloadPreviews(t *testing.T) {
+	chatText := "It is sunny."
+	reasoningType := schemas.ResponsesMessageTypeReasoning
+	callType := schemas.ResponsesMessageTypeFunctionCall
+	msgType := schemas.ResponsesMessageTypeMessage
+	assistantRole := schemas.ResponsesInputMessageRoleAssistant
+	finalAnswer := "已根据参考图生成三视图"
+
+	logs := []Log{
+		{
+			// chat 行：输出裁剪为 assistant 文本预览
+			Object: "chat.completion",
+			OutputMessageParsed: &schemas.ChatMessage{
+				Role:    schemas.ChatMessageRoleAssistant,
+				Content: &schemas.ChatMessageContent{ContentStr: &chatText},
+			},
+		},
+		{
+			// responses 行：只保留最后一条 message 的文本
+			Object: "response.stream",
+			ResponsesOutputParsed: []schemas.ResponsesMessage{
+				{Type: &reasoningType},
+				{Type: &callType},
+				{Type: &msgType, Role: &assistantRole, Content: &schemas.ResponsesMessageContent{ContentStr: &finalAnswer}},
+			},
+		},
+		{
+			// 纯 tool call 响应：无 assistant 文本时清空输出
+			Object:                "response.stream",
+			ResponsesOutputParsed: []schemas.ResponsesMessage{{Type: &callType}},
+		},
+		{
+			// Image Edit 行：剥离 base64 图片，仅保留 prompt
+			Object:             "image_edit",
+			ImageEditInputParsed: &schemas.ImageEditInput{Images: []schemas.ImageInput{{Image: []byte("base64")}}, Prompt: "把背景换成海边"},
+		},
+		{
+			// realtime.turn 行保持完整
+			Object: "realtime.turn",
+			OutputMessageParsed: &schemas.ChatMessage{
+				Role:    schemas.ChatMessageRoleAssistant,
+				Content: &schemas.ChatMessageContent{ContentStr: &chatText},
+			},
+		},
+	}
+
+	trimListPayloadPreviews(logs)
+
+	require.NotNil(t, logs[0].OutputMessageParsed)
+	require.NotNil(t, logs[0].OutputMessageParsed.Content)
+	assert.Equal(t, chatText, *logs[0].OutputMessageParsed.Content.ContentStr)
+	assert.Equal(t, schemas.ChatMessageRoleAssistant, logs[0].OutputMessageParsed.Role)
+
+	require.Len(t, logs[1].ResponsesOutputParsed, 1)
+	preview := logs[1].ResponsesOutputParsed[0]
+	assert.Equal(t, schemas.ResponsesMessageTypeMessage, *preview.Type)
+	require.NotNil(t, preview.Content)
+	assert.Equal(t, finalAnswer, *preview.Content.ContentStr)
+
+	assert.Nil(t, logs[2].ResponsesOutputParsed)
+
+	require.NotNil(t, logs[3].ImageEditInputParsed)
+	assert.Nil(t, logs[3].ImageEditInputParsed.Images, "base64 图片应被剥离")
+	assert.Equal(t, "把背景换成海边", logs[3].ImageEditInputParsed.Prompt)
+
+	assert.NotNil(t, logs[4].OutputMessageParsed, "realtime.turn 行不应被裁剪")
+}
+
 func TestBuildTags(t *testing.T) {
 	vkID := "vk_123"
 	rrID := "rr_456"

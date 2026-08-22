@@ -649,7 +649,7 @@ function OverheadBreakdown({ buckets, overheadMs }: { buckets: OverheadBucket[];
 								<span className={cn("h-2 w-2 shrink-0 rounded-[2px]", c.colorClass)} />
 								{c.label}
 								{/* normal-case: keep the unit as "µs" — uppercasing mangles the micro sign into "ΜS" (reads as ms) */}
-								<span className="tabular-nums normal-case">{formatMicros(c.totalUs)}</span>
+								<span className="normal-case tabular-nums">{formatMicros(c.totalUs)}</span>
 							</div>
 							<div className="space-y-1 pl-3">
 								{c.members.map((m) => (
@@ -870,7 +870,8 @@ export function LogDetailView({
 	}, [log?.id, revealAvailable]);
 
 	const allRoles: MessageRole[] = ["system", "user", "assistant", "tool", "reasoning"];
-	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set(allRoles));
+	// 默认只展示用户与助手消息，工具/系统/推理等角色需手动开启
+	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set<MessageRole>(["user", "assistant"]));
 
 	const handleToggleReveal = (checked: boolean) => {
 		setShowRevealedValues(checked && revealAvailable);
@@ -1974,10 +1975,14 @@ export function LogDetailView({
 											/>
 										)}
 										{(batchDebug.request_counts || batchDebug.accounting?.cost != null) && (
-											<div className="grid w-full grid-cols-1 md:grid-cols-3 items-start justify-between gap-4">
+											<div className="grid w-full grid-cols-1 items-start justify-between gap-4 md:grid-cols-3">
 												{batchDebug.request_counts && (
 													<>
-														<LogEntryDetailsView className="w-full" label="Total Requests" value={String(batchDebug.request_counts.total)} />
+														<LogEntryDetailsView
+															className="w-full"
+															label="Total Requests"
+															value={String(batchDebug.request_counts.total)}
+														/>
 														{batchRequestStates(batchDebug.request_counts).map(([label, count]) => (
 															<LogEntryDetailsView key={label} className="w-full" label={label} value={String(count)} />
 														))}
@@ -2262,7 +2267,7 @@ export function LogDetailView({
 				{batchDebug && (
 					<TabsContent value="details" className="space-y-4">
 						{(batchDebug.batch_id || (batchInlineRequests.length === 0 && batchInputFileId)) && (
-							<div className="bg-card rounded-sm border p-5 space-y-4">
+							<div className="bg-card space-y-4 rounded-sm border p-5">
 								{batchDebug.batch_id && (
 									<LogEntryDetailsView
 										label="Batch ID"
@@ -2344,9 +2349,7 @@ export function LogDetailView({
 																{result.model}
 															</Badge>
 														)}
-														{result.errorMessage && (
-															<span className="text-[11px] text-red-600 dark:text-red-400">Failed</span>
-														)}
+														{result.errorMessage && <span className="text-[11px] text-red-600 dark:text-red-400">Failed</span>}
 													</span>
 												</AccordionTrigger>
 												<AccordionContent className="space-y-3 pb-2">
@@ -2423,6 +2426,7 @@ export function LogDetailView({
 								<DropdownMenuCheckboxItem
 									checked={visibleRoles.size === allRoles.length}
 									onCheckedChange={(checked) => setVisibleRoles(checked ? new Set(allRoles) : new Set())}
+									onSelect={(e) => e.preventDefault()}
 								>
 									Show all messages
 								</DropdownMenuCheckboxItem>
@@ -2446,13 +2450,19 @@ export function LogDetailView({
 												return next;
 											})
 										}
+										// 阻止 Radix 默认的选中即关闭，仅点击菜单外或 Esc 才关闭
+										onSelect={(e) => e.preventDefault()}
 									>
 										<span className={cn("mr-1.5 inline-block h-2 w-2 rounded-sm", messageDotClass[role])} />
 										{label}
 									</DropdownMenuCheckboxItem>
 								))}
 								<DropdownMenuSeparator />
-								<DropdownMenuItem onClick={() => setVisibleRoles(new Set())} className="text-muted-foreground justify-center text-[12px]">
+								<DropdownMenuItem
+									onClick={() => setVisibleRoles(new Set())}
+									onSelect={(e) => e.preventDefault()}
+									className="text-muted-foreground justify-center text-[12px]"
+								>
 									Clear all
 								</DropdownMenuItem>
 							</DropdownMenuContent>

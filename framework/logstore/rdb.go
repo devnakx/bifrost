@@ -840,7 +840,12 @@ func (s *RDBLogStore) bulkUpdateCostPostgres(ctx context.Context, updates map[st
 
 // SearchLogs searches for logs in the database without calculating statistics.
 func (s *RDBLogStore) SearchLogs(ctx context.Context, filters SearchFilters, pagination PaginationOptions) (*SearchResult, error) {
-	return s.searchLogs(ctx, filters, pagination, s.listSelectColumns())
+	result, err := s.searchLogs(ctx, filters, pagination, s.listSelectColumns())
+	if err != nil || result == nil {
+		return result, err
+	}
+	trimListPayloadPreviews(result.Logs)
+	return result, nil
 }
 
 // SearchLogsForBilling searches with the billing projection.
@@ -1232,8 +1237,14 @@ func normalizeAggregateTimestamp(value any) string {
 }
 
 // listSelectColumns returns a SELECT clause for list queries that omits large
-// output/detail TEXT columns and uses SQL JSON functions to extract only the
-// last element from input_history and responses_input_history arrays.
+// detail TEXT columns and uses SQL JSON functions to extract only the last
+// element from input_history and responses_input_history arrays.
+//
+// Output columns (output_message, responses_output) are selected in full and
+// trimmed in Go after the query (trimListOutputPreviews) down to the last
+// assistant message text: extracting that preview in SQL would need
+// dialect-specific JSON path logic per dialect, while the Go trim keeps the
+// /api/logs response body small with one shared code path.
 //
 // Realtime turn rows are kept intact because the logs table renders them as a
 // combined Tool/User/Assistant summary and needs the full turn context.
@@ -1250,6 +1261,9 @@ func (s *RDBLogStore) listSelectColumns() string {
 		"team_ids", "team_names", "customer_ids", "customer_names", "business_unit_ids", "business_unit_names",
 		"user_agent", "app",
 		"speech_input", "transcription_input", "image_generation_input", "video_generation_input",
+		// image_edit_input carries base64 images; trimListPayloadPreviews strips
+		// them down to the prompt before the list response is serialized.
+		"image_edit_input",
 		// error_details is intentionally excluded from the list select: for status=error
 		// rows it can carry the provider's full (unbounded) error payload, and 25+ such
 		// rows can push the /api/logs response past Cloud Run's 32MB body limit (500s).
@@ -1265,7 +1279,7 @@ func (s *RDBLogStore) listSelectColumns() string {
 		"created_at",
 	}, ", ")
 
-	var inputHistoryExpr, responsesInputExpr, outputMessageExpr string
+	var inputHistoryExpr, responsesInputExpr string
 	switch s.db.Dialector.Name() {
 	case "postgres":
 		// Postgres jsonb rejects malformed JSON (22P02), \u0000 escapes
@@ -1281,7 +1295,6 @@ func (s *RDBLogStore) listSelectColumns() string {
 			WHEN object_type = 'realtime.turn' THEN responses_input_history
 			ELSE bifrost_safe_jsonb(responses_input_history)
 			END AS responses_input_history`
-		outputMessageExpr = `CASE WHEN object_type = 'realtime.turn' THEN output_message ELSE NULL END AS output_message`
 	case "clickhouse":
 		// ClickHouse: return the full history columns as-is. The last-message
 		// truncation optimization the SQLite/Postgres list path applies is
@@ -1289,15 +1302,20 @@ func (s *RDBLogStore) listSelectColumns() string {
 		// content_summary already bound list payloads in practice.
 		inputHistoryExpr = `input_history AS input_history`
 		responsesInputExpr = `responses_input_history AS responses_input_history`
-		outputMessageExpr = `CASE WHEN object_type = 'realtime.turn' THEN output_message ELSE NULL END AS output_message`
 	default: // sqlite
+		// 预览优先取最后一条 user/assistant 条目：末条是工具输出且本次请求无
+		// assistant 文本时，UI 仍能回退到人类消息；找不到人类条目时回退末条
 		inputHistoryExpr = `CASE
 			WHEN object_type = 'realtime.turn' THEN input_history
 			WHEN input_history IS NOT NULL AND input_history != '' AND input_history != '[]'
 			     AND json_valid(input_history) = 1
 			     AND json_type(input_history) = 'array'
 			     AND json_array_length(input_history) > 0
-			THEN json_array(json_extract(input_history, '$[' || (json_array_length(input_history) - 1) || ']'))
+			THEN coalesce(
+				(SELECT json_array(value) FROM json_each(input_history)
+				 WHERE json_extract(value, '$.role') IN ('user', 'assistant')
+				 ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
+				json_array(json_extract(input_history, '$[' || (json_array_length(input_history) - 1) || ']')))
 			ELSE input_history END AS input_history`
 		responsesInputExpr = `CASE
 			WHEN object_type = 'realtime.turn' THEN responses_input_history
@@ -1305,12 +1323,17 @@ func (s *RDBLogStore) listSelectColumns() string {
 			     AND json_valid(responses_input_history) = 1
 			     AND json_type(responses_input_history) = 'array'
 			     AND json_array_length(responses_input_history) > 0
-			THEN json_array(json_extract(responses_input_history, '$[' || (json_array_length(responses_input_history) - 1) || ']'))
+			THEN coalesce(
+				(SELECT json_array(value) FROM json_each(responses_input_history)
+				 WHERE ifnull(json_extract(value, '$.type'), 'message') = 'message'
+				   AND json_extract(value, '$.role') IN ('user', 'assistant')
+				 ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
+				json_array(json_extract(responses_input_history, '$[' || (json_array_length(responses_input_history) - 1) || ']')))
 			ELSE responses_input_history END AS responses_input_history`
-		outputMessageExpr = `CASE WHEN object_type = 'realtime.turn' THEN output_message ELSE NULL END AS output_message`
 	}
 
-	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", " + outputMessageExpr
+	// 输出列全量读出，由 trimListOutputPreviews 在 Go 侧裁剪为助手预览
+	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", output_message, responses_output"
 }
 
 // billingPayloadColumns are the payload columns cost recomputation reads to recover a

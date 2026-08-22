@@ -585,6 +585,69 @@ func extractResponsesMessageText(msg *schemas.ResponsesMessage) string {
 	return ""
 }
 
+// maxListOutputPreviewRunes 限制列表行助手输出预览长度，防止长答案撑大 /api/logs 响应体
+const maxListOutputPreviewRunes = 512
+
+// trimListPayloadPreviews 将列表行的完整 payload 替换为轻量预览：输出仅保留
+// 最后一条 assistant 文本，Image Edit 输入仅保留 prompt（剥离 base64 图片），
+// 供 UI 的 Message 列展示；realtime.turn 行保持完整
+// （日志表将其渲染为 Tool/User/Assistant 组合摘要，需要完整轮次上下文）
+func trimListPayloadPreviews(logs []Log) {
+	for i := range logs {
+		if logs[i].Object == "realtime.turn" {
+			continue
+		}
+		// Image Edit 输入可能含 base64 图片，列表行只保留 prompt 预览
+		if edit := logs[i].ImageEditInputParsed; edit != nil {
+			logs[i].ImageEditInputParsed = nil
+			if edit.Prompt != "" {
+				logs[i].ImageEditInputParsed = &schemas.ImageEditInput{
+					Prompt: truncateRunes(edit.Prompt, maxListOutputPreviewRunes),
+				}
+			}
+		}
+		if msg := logs[i].OutputMessageParsed; msg != nil {
+			logs[i].OutputMessageParsed = nil
+			if text := truncateRunes(extractChatMessageText(msg), maxListOutputPreviewRunes); text != "" {
+				logs[i].OutputMessageParsed = &schemas.ChatMessage{
+					Role:    schemas.ChatMessageRoleAssistant,
+					Content: &schemas.ChatMessageContent{ContentStr: &text},
+				}
+			}
+		}
+		if out := logs[i].ResponsesOutputParsed; len(out) > 0 {
+			logs[i].ResponsesOutputParsed = nil
+			if text := truncateRunes(lastAssistantResponsesOutputText(out), maxListOutputPreviewRunes); text != "" {
+				msgType := schemas.ResponsesMessageTypeMessage
+				role := schemas.ResponsesInputMessageRoleAssistant
+				logs[i].ResponsesOutputParsed = []schemas.ResponsesMessage{{
+					Type:    &msgType,
+					Role:    &role,
+					Content: &schemas.ResponsesMessageContent{ContentStr: &text},
+				}}
+			}
+		}
+	}
+}
+
+// lastAssistantResponsesOutputText 返回 Responses 输出里最后一条 message 类型条目的文本，
+// 即本次请求的最终回答
+func lastAssistantResponsesOutputText(out []schemas.ResponsesMessage) string {
+	for i := len(out) - 1; i >= 0; i-- {
+		msgType := schemas.ResponsesMessageTypeMessage
+		if out[i].Type != nil {
+			msgType = *out[i].Type
+		}
+		if msgType != schemas.ResponsesMessageTypeMessage {
+			continue
+		}
+		if text := extractResponsesMessageText(&out[i]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 // attachmentStrippedPlaceholder replaces attachment payloads (base64 data,
 // image/file URLs, audio data) in the last-user-message preview kept in the
 // DB row. The untouched original always lives in object storage.
