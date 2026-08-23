@@ -870,8 +870,8 @@ export function LogDetailView({
 	}, [log?.id, revealAvailable]);
 
 	const allRoles: MessageRole[] = ["system", "user", "assistant", "tool", "reasoning"];
-	// 默认只展示用户与助手消息，工具/系统/推理等角色需手动开启
-	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set<MessageRole>(["user", "assistant"]));
+	// 默认展示用户、助手与推理消息；工具/系统等角色需手动开启
+	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set<MessageRole>(["user", "assistant", "reasoning"]));
 
 	const handleToggleReveal = (checked: boolean) => {
 		setShowRevealedValues(checked && revealAvailable);

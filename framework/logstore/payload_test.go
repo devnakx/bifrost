@@ -140,29 +140,52 @@ func TestTrimListPayloadPreviews(t *testing.T) {
 	msgType := schemas.ResponsesMessageTypeMessage
 	assistantRole := schemas.ResponsesInputMessageRoleAssistant
 	finalAnswer := "已根据参考图生成三视图"
+	reasoningSummary := "**Processing image reference**\n\nI need to check the view_image"
+	encrypted := "gAAAAABqiowC"
 
 	logs := []Log{
 		{
-			// chat 行：输出裁剪为 assistant 文本预览
-			Object: "chat.completion",
-			OutputMessageParsed: &schemas.ChatMessage{
-				Role:    schemas.ChatMessageRoleAssistant,
-				Content: &schemas.ChatMessageContent{ContentStr: &chatText},
-			},
-		},
-		{
-			// responses 行：只保留最后一条 message 的文本
+			// responses 行：正文与 reasoning 摘要都保留，tool call 丢弃
 			Object: "response.stream",
 			ResponsesOutputParsed: []schemas.ResponsesMessage{
-				{Type: &reasoningType},
+				{Type: &reasoningType, ResponsesReasoning: &schemas.ResponsesReasoning{
+					Summary: []schemas.ResponsesReasoningSummary{{Type: schemas.ResponsesReasoningContentBlockTypeSummaryText, Text: reasoningSummary}},
+				}},
 				{Type: &callType},
 				{Type: &msgType, Role: &assistantRole, Content: &schemas.ResponsesMessageContent{ContentStr: &finalAnswer}},
 			},
 		},
 		{
-			// 纯 tool call 响应：无 assistant 文本时清空输出
-			Object:                "response.stream",
-			ResponsesOutputParsed: []schemas.ResponsesMessage{{Type: &callType}},
+			// 纯 tool call + reasoning：无 assistant 正文时 reasoning 仍保留，
+			// 供 UI 的 Message 列区分 reasoning 不同的请求
+			Object: "response.stream",
+			ResponsesOutputParsed: []schemas.ResponsesMessage{
+				{Type: &reasoningType, ResponsesReasoning: &schemas.ResponsesReasoning{
+					Summary: []schemas.ResponsesReasoningSummary{{Type: schemas.ResponsesReasoningContentBlockTypeSummaryText, Text: "另一个 reasoning"}},
+				}},
+				{Type: &callType},
+			},
+		},
+		{
+			// chat 行：正文预览与 reasoning 字段都保留
+			Object: "chat.completion",
+			OutputMessageParsed: &schemas.ChatMessage{
+				Role:    schemas.ChatMessageRoleAssistant,
+				Content: &schemas.ChatMessageContent{ContentStr: &chatText},
+				ChatAssistantMessage: &schemas.ChatAssistantMessage{
+					Reasoning: &reasoningSummary,
+				},
+			},
+		},
+		{
+			// 仅 encrypted_content 的 reasoning（无 summary）整条丢弃
+			Object: "response.stream",
+			ResponsesOutputParsed: []schemas.ResponsesMessage{
+				{Type: &reasoningType, ResponsesReasoning: &schemas.ResponsesReasoning{
+					EncryptedContent: &encrypted,
+				}},
+				{Type: &callType},
+			},
 		},
 		{
 			// Image Edit 行：剥离 base64 图片，仅保留 prompt
@@ -181,24 +204,41 @@ func TestTrimListPayloadPreviews(t *testing.T) {
 
 	trimListPayloadPreviews(logs)
 
-	require.NotNil(t, logs[0].OutputMessageParsed)
-	require.NotNil(t, logs[0].OutputMessageParsed.Content)
-	assert.Equal(t, chatText, *logs[0].OutputMessageParsed.Content.ContentStr)
-	assert.Equal(t, schemas.ChatMessageRoleAssistant, logs[0].OutputMessageParsed.Role)
-
-	require.Len(t, logs[1].ResponsesOutputParsed, 1)
-	preview := logs[1].ResponsesOutputParsed[0]
+	// 行 0：reasoning + message 两条预览
+	require.Len(t, logs[0].ResponsesOutputParsed, 2)
+	assert.Equal(t, schemas.ResponsesMessageTypeReasoning, *logs[0].ResponsesOutputParsed[0].Type)
+	require.NotNil(t, logs[0].ResponsesOutputParsed[0].ResponsesReasoning)
+	require.Len(t, logs[0].ResponsesOutputParsed[0].Summary, 1)
+	assert.Equal(t, reasoningSummary, logs[0].ResponsesOutputParsed[0].Summary[0].Text)
+	assert.Nil(t, logs[0].ResponsesOutputParsed[0].EncryptedContent)
+	preview := logs[0].ResponsesOutputParsed[1]
 	assert.Equal(t, schemas.ResponsesMessageTypeMessage, *preview.Type)
 	require.NotNil(t, preview.Content)
 	assert.Equal(t, finalAnswer, *preview.Content.ContentStr)
 
-	assert.Nil(t, logs[2].ResponsesOutputParsed)
+	// 行 1：无正文时仅保留 reasoning
+	require.Len(t, logs[1].ResponsesOutputParsed, 1)
+	assert.Equal(t, schemas.ResponsesMessageTypeReasoning, *logs[1].ResponsesOutputParsed[0].Type)
+	require.NotNil(t, logs[1].ResponsesOutputParsed[0].ResponsesReasoning)
 
-	require.NotNil(t, logs[3].ImageEditInputParsed)
-	assert.Nil(t, logs[3].ImageEditInputParsed.Images, "base64 图片应被剥离")
-	assert.Equal(t, "把背景换成海边", logs[3].ImageEditInputParsed.Prompt)
+	// 行 2：chat 正文与 reasoning 都保留
+	require.NotNil(t, logs[2].OutputMessageParsed)
+	require.NotNil(t, logs[2].OutputMessageParsed.Content)
+	assert.Equal(t, chatText, *logs[2].OutputMessageParsed.Content.ContentStr)
+	require.NotNil(t, logs[2].OutputMessageParsed.ChatAssistantMessage)
+	require.NotNil(t, logs[2].OutputMessageParsed.Reasoning)
+	assert.Equal(t, reasoningSummary, *logs[2].OutputMessageParsed.Reasoning)
 
-	assert.NotNil(t, logs[4].OutputMessageParsed, "realtime.turn 行不应被裁剪")
+	// 行 3：仅 encrypted 的 reasoning 整条丢弃
+	assert.Nil(t, logs[3].ResponsesOutputParsed)
+
+	// 行 4：image edit 只留 prompt
+	require.NotNil(t, logs[4].ImageEditInputParsed)
+	assert.Nil(t, logs[4].ImageEditInputParsed.Images, "base64 图片应被剥离")
+	assert.Equal(t, "把背景换成海边", logs[4].ImageEditInputParsed.Prompt)
+
+	// 行 5：realtime 不动
+	assert.NotNil(t, logs[5].OutputMessageParsed, "realtime.turn 行不应被裁剪")
 }
 
 func TestBuildTags(t *testing.T) {

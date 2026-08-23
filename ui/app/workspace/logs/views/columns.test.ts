@@ -124,6 +124,54 @@ describe("getMessage", () => {
 		expect(getMessage(log)).toBe("补全这个女角色的全身三视图");
 	});
 
+	it("prepends reasoning snippet when same last input but different reasoning", () => {
+		// 复现生产场景：两行末条 user/assistant 相同、reasoning 不同
+		const makeLog = (reasoningText: string) =>
+			({
+				object: "response.stream",
+				responses_input_history: [{ type: "message", role: "assistant", content: "我将按同一材质生成三视图" }],
+				responses_output: [
+					{ type: "reasoning", summary: [{ type: "summary_text", text: reasoningText }] },
+					{ type: "custom_tool_call", name: "exec", call_id: "c1" },
+				],
+			}) as unknown as LogEntry;
+
+		const first = getMessage(makeLog("**Processing image reference**"));
+		const second = getMessage(makeLog("**Considering image generation**"));
+
+		expect(first).toBe("Reasoning: **Processing image reference**\n我将按同一材质生成三视图");
+		expect(second).toBe("Reasoning: **Considering image generation**\n我将按同一材质生成三视图");
+		expect(first).not.toBe(second);
+	});
+
+	it("ignores encrypted-only reasoning and falls back to last input", () => {
+		const log = {
+			object: "response.stream",
+			responses_input_history: [{ type: "message", role: "user", content: "补全三视图" }],
+			responses_output: [
+				{ type: "reasoning", encrypted_content: "gAAAAABqiowC" },
+				{ type: "custom_tool_call", name: "exec", call_id: "c1" },
+			],
+		} as unknown as LogEntry;
+
+		expect(getMessage(log)).toBe("补全三视图");
+	});
+
+	it("prepends chat reasoning when output has no text", () => {
+		const log = {
+			object: "chat.completion",
+			input_history: [{ role: "user", content: "what is the weather?" }],
+			output_message: {
+				role: "assistant",
+				content: "",
+				tool_calls: [{ function: { name: "get_weather", arguments: "{}" } }],
+				reasoning: "Need to call weather API",
+			},
+		} as unknown as LogEntry;
+
+		expect(getMessage(log)).toBe("Reasoning: Need to call weather API\nwhat is the weather?");
+	});
+
 	it("returns final assistant output for responses requests", () => {
 		const log = {
 			object: "response.stream",

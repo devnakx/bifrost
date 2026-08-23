@@ -3,6 +3,7 @@ package logstore
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -589,8 +590,8 @@ func extractResponsesMessageText(msg *schemas.ResponsesMessage) string {
 const maxListOutputPreviewRunes = 512
 
 // trimListPayloadPreviews 将列表行的完整 payload 替换为轻量预览：输出仅保留
-// 最后一条 assistant 文本，Image Edit 输入仅保留 prompt（剥离 base64 图片），
-// 供 UI 的 Message 列展示；realtime.turn 行保持完整
+// 最后一条 assistant 文本与 reasoning 摘要，Image Edit 输入仅保留 prompt
+// （剥离 base64 图片），供 UI 的 Message 列展示；realtime.turn 行保持完整
 // （日志表将其渲染为 Tool/User/Assistant 组合摘要，需要完整轮次上下文）
 func trimListPayloadPreviews(logs []Log) {
 	for i := range logs {
@@ -608,44 +609,86 @@ func trimListPayloadPreviews(logs []Log) {
 		}
 		if msg := logs[i].OutputMessageParsed; msg != nil {
 			logs[i].OutputMessageParsed = nil
+			// Chat：保留正文预览与 reasoning 字段，剥离工具调用参数等大载荷
 			if text := truncateRunes(extractChatMessageText(msg), maxListOutputPreviewRunes); text != "" {
-				logs[i].OutputMessageParsed = &schemas.ChatMessage{
+				preview := &schemas.ChatMessage{
 					Role:    schemas.ChatMessageRoleAssistant,
 					Content: &schemas.ChatMessageContent{ContentStr: &text},
 				}
+				if reasoning := chatReasoningPreview(msg); reasoning != nil {
+					preview.ChatAssistantMessage = &schemas.ChatAssistantMessage{
+						Reasoning: reasoning,
+					}
+				}
+				logs[i].OutputMessageParsed = preview
 			}
 		}
 		if out := logs[i].ResponsesOutputParsed; len(out) > 0 {
-			logs[i].ResponsesOutputParsed = nil
-			if text := truncateRunes(lastAssistantResponsesOutputText(out), maxListOutputPreviewRunes); text != "" {
-				msgType := schemas.ResponsesMessageTypeMessage
-				role := schemas.ResponsesInputMessageRoleAssistant
-				logs[i].ResponsesOutputParsed = []schemas.ResponsesMessage{{
-					Type:    &msgType,
-					Role:    &role,
-					Content: &schemas.ResponsesMessageContent{ContentStr: &text},
-				}}
-			}
+			logs[i].ResponsesOutputParsed = responsesOutputPreview(out)
 		}
 	}
 }
 
-// lastAssistantResponsesOutputText 返回 Responses 输出里最后一条 message 类型条目的文本，
-// 即本次请求的最终回答
-func lastAssistantResponsesOutputText(out []schemas.ResponsesMessage) string {
-	for i := len(out) - 1; i >= 0; i-- {
+// responsesOutputPreview 保留输出里的 assistant 文本与 reasoning 摘要条目，
+// 供 UI 的 Message 列在无 assistant 正文时以 reasoning 区分不同的请求
+func responsesOutputPreview(out []schemas.ResponsesMessage) []schemas.ResponsesMessage {
+	preview := make([]schemas.ResponsesMessage, 0, 2)
+	for i := range out {
 		msgType := schemas.ResponsesMessageTypeMessage
 		if out[i].Type != nil {
 			msgType = *out[i].Type
 		}
-		if msgType != schemas.ResponsesMessageTypeMessage {
-			continue
-		}
-		if text := extractResponsesMessageText(&out[i]); text != "" {
-			return text
+		switch msgType {
+		case schemas.ResponsesMessageTypeMessage:
+			if text := truncateRunes(extractResponsesMessageText(&out[i]), maxListOutputPreviewRunes); text != "" {
+				role := schemas.ResponsesInputMessageRoleAssistant
+				content := schemas.ResponsesMessageContent{ContentStr: &text}
+				preview = append(preview, schemas.ResponsesMessage{
+					Type:    &msgType,
+					Role:    &role,
+					Content: &content,
+				})
+			}
+		case schemas.ResponsesMessageTypeReasoning:
+			// 只保留可读 summary，丢弃 encrypted_content（不可读且体积大）
+			if reasoning := out[i].ResponsesReasoning; reasoning != nil && len(reasoning.Summary) > 0 {
+				msgTypeReasoning := schemas.ResponsesMessageTypeReasoning
+				preview = append(preview, schemas.ResponsesMessage{
+					Type:                &msgTypeReasoning,
+					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: reasoning.Summary},
+				})
+			}
 		}
 	}
-	return ""
+	if len(preview) == 0 {
+		return nil
+	}
+	return preview
+}
+
+// chatReasoningPreview 返回 Chat 输出消息的 reasoning 可读文本（reasoning 字段优先，
+// 回退 reasoning_details），无 reasoning 时返回 nil
+func chatReasoningPreview(msg *schemas.ChatMessage) *string {
+	if msg.ChatAssistantMessage == nil {
+		return nil
+	}
+	if msg.Reasoning != nil && *msg.Reasoning != "" {
+		text := truncateRunes(*msg.Reasoning, maxListOutputPreviewRunes)
+		return &text
+	}
+	parts := make([]string, 0, len(msg.ReasoningDetails))
+	for _, d := range msg.ReasoningDetails {
+		if d.Text != nil && *d.Text != "" {
+			parts = append(parts, *d.Text)
+		} else if d.Summary != nil && *d.Summary != "" {
+			parts = append(parts, *d.Summary)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	joined := truncateRunes(strings.Join(parts, "\n"), maxListOutputPreviewRunes)
+	return &joined
 }
 
 // attachmentStrippedPlaceholder replaces attachment payloads (base64 data,
