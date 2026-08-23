@@ -60,8 +60,8 @@ func TestCrossProviderFallback_LexicographicWhenNoVendorInferred(t *testing.T) {
 // 候选行跨 mode 时优先请求的 mode，缺请求 mode 才回退相邻 mode
 func TestCrossProviderFallback_ModePreference(t *testing.T) {
 	s := testStoreWithPricing(map[string]configstoreTables.TableModelPricing{
-		makeKey("weird-model", "azure", "responses"):    seedRow("weird-model", "azure", "responses", 1, 1),
-		makeKey("weird-model", "dashscope", "chat"):     seedRow("weird-model", "dashscope", "chat", 2, 2),
+		makeKey("weird-model", "azure", "responses"): seedRow("weird-model", "azure", "responses", 1, 1),
+		makeKey("weird-model", "dashscope", "chat"):  seedRow("weird-model", "dashscope", "chat", 2, 2),
 	})
 
 	row, ok := s.getBasePricing("weird-model", "aihubmix", schemas.ChatCompletionRequest)
