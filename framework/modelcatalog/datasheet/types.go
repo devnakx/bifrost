@@ -613,12 +613,34 @@ func withRetries[T any](ctx context.Context, maxRetries int, maxBackoff time.Dur
 	return zero, lastErr
 }
 
+// clampNonNegativePricing 将负数价格字段归一化为 0
+// 上游 datasheet 偶发出现 *_cost_per_token: -1 哨兵值，原样入库会破坏前端展示与成本计算
+// 负数替换为指向 0 的新指针而非 nil，保留“有此项但免费”的语义
+// 用 reflect 扫描全部 *float64 字段，新增价格字段时零维护成本
+func clampNonNegativePricing(p configstoreTables.TableModelPricing) configstoreTables.TableModelPricing {
+	v := reflect.ValueOf(&p).Elem()
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		// 仅处理非 nil 的 float64 指针字段
+		if f.Kind() != reflect.Pointer || f.IsNil() || t.Field(i).Type.Elem().Kind() != reflect.Float64 {
+			continue
+		}
+		if f.Elem().Float() < 0 {
+			zero := 0.0
+			// 重新分配指针避免外部别名读到旧负数
+			f.Set(reflect.ValueOf(&zero))
+		}
+	}
+	return p
+}
+
 // convertEntryToTablePricing converts a parsed Entry from the upstream
 // datasheet into the row shape persisted in the config store.
 func convertEntryToTablePricing(modelKey string, entry Entry) configstoreTables.TableModelPricing {
 	provider := normalizeProvider(entry.Provider)
 	modelName := extractModelName(modelKey)
-	return configstoreTables.TableModelPricing{
+	return clampNonNegativePricing(configstoreTables.TableModelPricing{
 		Model:           modelName,
 		BaseModel:       entry.BaseModel,
 		Provider:        provider,
@@ -736,7 +758,7 @@ func convertEntryToTablePricing(modelKey string, entry Entry) configstoreTables.
 
 		OCRCostPerPage:        entry.OCRCostPerPage,
 		AnnotationCostPerPage: entry.AnnotationCostPerPage,
-	}
+	})
 }
 
 // convertTablePricingToEntry converts a TableModelPricing row from the DB back
