@@ -488,6 +488,15 @@ export const logsApi = baseApi.injectEndpoints({
 			query: (id) => `/logs/${encodeURIComponent(id)}/raw`,
 			providesTags: (_result, _error, id) => [{ type: "LogRaw", id }],
 		}),
+
+		// 单页消息查询（导出合并用，复用 baseQuery 鉴权链路）
+		getLogMessagesPage: builder.query<LogMessagesResponse, { id: string; offset: number; limit: number }>({
+			query: ({ id, offset, limit }) => ({
+				url: `/logs/${encodeURIComponent(id)}/messages`,
+				params: { offset, limit },
+			}),
+			providesTags: (_result, _error, arg) => [{ type: "LogMessages", id: arg.id }],
+		}),
 	}),
 });
 
@@ -535,4 +544,5 @@ export const {
 	useGetLogMessagesInfiniteQuery,
 	useGetLogRawQuery,
 	useLazyGetLogRawQuery,
+	useLazyGetLogMessagesPageQuery,
 } = logsApi;

@@ -135,7 +135,7 @@ export function LogDetailSheet({
 							canReveal={canReveal}
 							onClose={() => onOpenChange(false)}
 							onFilterByParentRequestId={onFilterByParentRequestId}
-							paginatedMessages={flatMessages as any}
+							paginatedMessages={flatMessages}
 							hasMoreMessages={Boolean(hasNextPage)}
 							isFetchingMoreMessages={isFetchingNextPage}
 							sentinelRef={sentinelRef as React.RefObject<HTMLDivElement>}

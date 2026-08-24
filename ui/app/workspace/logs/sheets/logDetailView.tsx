@@ -39,12 +39,11 @@ import {
 	RoutingEngineUsedLabels,
 	Status,
 } from "@/lib/constants/logs";
-import { BatchRequestCounts, ContentBlock, LogEntry, OverheadBucket, ResponsesMessage } from "@/lib/types/logs";
+import { BatchRequestCounts, ChatMessage, ContentBlock, LogEntry, OverheadBucket, ResponsesMessage } from "@/lib/types/logs";
 import { useGetUserAgentMappingsQuery } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { useLazyGetLogRawQuery } from "@/lib/store/apis/logsApi";
+import { useLazyGetLogMessagesPageQuery, useLazyGetLogRawQuery } from "@/lib/store/apis/logsApi";
 import { downloadAsJson } from "@/lib/utils/browser-download";
-import { getApiBaseUrl } from "@/lib/utils/port";
 import { formatCompactNumber } from "@/lib/utils/numbers";
 import { applyRedactionMapping, hasRedactionMappingEntries } from "@/lib/utils/redaction";
 import { isJson } from "@/lib/utils/validation";
@@ -63,6 +62,10 @@ import PluginLogsView from "../views/pluginLogsView";
 import SpeechView from "../views/speechView";
 import TranscriptionView from "../views/transcriptionView";
 import VideoView from "../views/videoView";
+
+// 分页消息归一化类型：chat 与 responses 共用同一滚动容器
+type PaginatedMessage = ChatMessage | ResponsesMessage;
+
 
 const formatRealtimeTransport = (value: unknown): string => {
 	const transport = String(value ?? "").trim();
@@ -873,6 +876,7 @@ export function LogDetailView({
 	const [showRevealedValues, setShowRevealedValues] = useState(false);
 	// raw 懒加载：首次展开 raw tab 才请求
 	const [triggerRaw, { data: rawData, isFetching: isRawFetching }] = useLazyGetLogRawQuery();
+	const [triggerMessagesPage] = useLazyGetLogMessagesPageQuery();
 	const rawTabActiveRef = useRef(false);
 	const hasFetchedRawRef = useRef(false);
 	// 有效 redaction mapping 优先来自 raw 端点
@@ -1141,8 +1145,7 @@ export function LogDetailView({
 														raw = await triggerRaw(log.id).unwrap();
 													} catch {}
 												}
-												let allMessages: unknown[] = Array.isArray(paginatedMessages) ? [...(paginatedMessages as unknown[])] : [];
-												const base = getApiBaseUrl();
+												let allMessages: unknown[] = Array.isArray(paginatedMessages) ? [...paginatedMessages] : [];
 												if (log?.id) {
 													const needFetch = hasMoreMessages || allMessages.length === 0;
 													if (needFetch) {
@@ -1153,32 +1156,32 @@ export function LogDetailView({
 															offset = 0;
 														}
 														while (hasMore) {
-															const resp = await fetch(`${base}/logs/${encodeURIComponent(log.id)}/messages?offset=${offset}&limit=100`, {
-																credentials: "include",
-															});
-															if (!resp.ok) break;
-															const json = await resp.json();
-															const msgs: unknown[] = json.messages ?? [];
-															if (allMessages.length === 0 && offset === 0) {
-																allMessages = msgs;
-															} else {
-																allMessages = [...allMessages, ...msgs];
+															try {
+																const page = await triggerMessagesPage({ id: log.id, offset, limit: 100 }).unwrap();
+																const msgs: unknown[] = page.messages ?? [];
+																if (allMessages.length === 0 && offset === 0) {
+																	allMessages = msgs;
+																} else {
+																	allMessages = [...allMessages, ...msgs];
+																}
+																hasMore = Boolean(page.has_more);
+																if (!msgs.length) break;
+																offset += msgs.length;
+																if (!hasMore) break;
+															} catch {
+																break;
 															}
-															hasMore = Boolean(json.has_more);
-															if (!msgs.length) break;
-															offset += msgs.length;
-															if (!hasMore) break;
 														}
 													}
 												}
-												const merged: Record<string, unknown> = {
+												const merged: Record<string, unknown> & { messages?: unknown[] } = {
 													...log,
 													raw_request: raw?.raw_request ?? log.raw_request,
 													raw_response: raw?.raw_response ?? log.raw_response,
 													redaction_mapping: raw?.redaction_mapping ?? log.redaction_mapping,
 												};
 												if (allMessages.length > 0) {
-													(merged as any).messages = allMessages;
+													merged.messages = allMessages;
 												}
 												downloadAsJson(merged, `log-${log.id ?? "export"}.json`);
 											} catch {
@@ -2569,14 +2572,15 @@ export function LogDetailView({
 								{hasMoreMessages ? "+" : ""})
 							</div>
 							<div className="space-y-3">
-								{(paginatedMessages as any[]).map((msg: any, idx: number) => {
-									const isChatLike = msg && typeof msg.role === "string";
+								{(paginatedMessages as PaginatedMessage[]).map((msg: PaginatedMessage, idx: number) => {
+									const isChatLike = (msg as ChatMessage) && typeof (msg as ChatMessage).role === "string";
 									if (isChatLike) {
-										const role = ((msg.role as string) || "user") as MessageRole;
+										const chatMsg = msg as ChatMessage;
+										const role = ((chatMsg.role as string) || "user") as MessageRole;
 										if (visibleRoles.size < 5 && !visibleRoles.has(role) && !(role === "assistant" && visibleRoles.has("assistant")))
 											return null;
-										const text = extractMessageText(msg, activeInputRevealMapping) || extractMessageText(msg, activeOutputRevealMapping);
-										const reasoningText = extractChatReasoning(msg, activeInputRevealMapping);
+										const text = extractMessageText(chatMsg, activeInputRevealMapping) || extractMessageText(chatMsg, activeOutputRevealMapping);
+										const reasoningText = extractChatReasoning(chatMsg, activeInputRevealMapping);
 										return (
 											<div key={idx}>
 												{reasoningText && (visibleRoles.has("reasoning") || visibleRoles.size === 5) ? (
@@ -2584,22 +2588,23 @@ export function LogDetailView({
 														<CollapsibleCode text={reasoningText} preview={3} mono={false} />
 													</MessageRow>
 												) : null}
-												<MessageRow role={role} last={idx === (paginatedMessages as any[]).length - 1 && !hasMoreMessages}>
+												<MessageRow role={role} last={idx === (paginatedMessages as PaginatedMessage[]).length - 1 && !hasMoreMessages}>
 													{text ? (
 														<CollapsibleCode text={text} preview={3} mono={false} />
 													) : (
-														<LogChatMessageView message={msg} audioFormat={audioFormat} />
+														<LogChatMessageView message={chatMsg} audioFormat={audioFormat} />
 													)}
 												</MessageRow>
 											</div>
 										);
 									}
-									const rRole = getResponsesRole(msg as any);
+									const responsesMsg = msg as ResponsesMessage;
+									const rRole = getResponsesRole(responsesMsg);
 									if (visibleRoles.size < 5 && !visibleRoles.has(rRole)) return null;
-									const text = extractResponsesText(msg as any, rRole === "reasoning" ? undefined : activeInputRevealMapping);
-									const reasoning = rRole === "reasoning" ? extractReasoningParts(msg as any, activeInputRevealMapping) : null;
+									const text = extractResponsesText(responsesMsg, rRole === "reasoning" ? undefined : activeInputRevealMapping);
+									const reasoning = rRole === "reasoning" ? extractReasoningParts(responsesMsg, activeInputRevealMapping) : null;
 									return (
-										<MessageRow key={idx} role={rRole} last={idx === (paginatedMessages as any[]).length - 1 && !hasMoreMessages}>
+										<MessageRow key={idx} role={rRole} last={idx === (paginatedMessages as PaginatedMessage[]).length - 1 && !hasMoreMessages}>
 											{reasoning ? (
 												<div className="space-y-2">
 													{reasoning.contentText ? <CollapsibleCode text={reasoning.contentText} preview={3} mono={false} /> : null}
