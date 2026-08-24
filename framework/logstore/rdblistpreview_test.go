@@ -13,8 +13,8 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// newListPreviewStore 返回种子化内存 sqlite store，覆盖列表预览两类场景：
-// agent 续跑行（输入末条为工具输出、输出无 assistant 文本）与普通行（末条为 user）
+// newListPreviewStore 返回种子化内存 sqlite store，覆盖 session 预览两类场景：
+// agent 续跑行（输入末条为工具输出）与普通行（末条为 user）
 func newListPreviewStore(t *testing.T) *RDBLogStore {
 	t.Helper()
 
@@ -28,10 +28,12 @@ func newListPreviewStore(t *testing.T) *RDBLogStore {
 	require.NoError(t, db.AutoMigrate(&Log{}))
 
 	now := time.Now()
+	parent := "list-preview-parent"
 	seed := []Log{
 		{
 			// agent 续跑轮：输入末条是工具输出，输出只有 reasoning + tool call
 			ID:                    "agent-turn",
+			ParentRequestID:       &parent,
 			Timestamp:             now,
 			Object:                "responses_stream",
 			Status:                "success",
@@ -41,6 +43,7 @@ func newListPreviewStore(t *testing.T) *RDBLogStore {
 		{
 			// 普通行：输入末条即 user 消息，预览行为保持不变
 			ID:                    "plain-turn",
+			ParentRequestID:       &parent,
 			Timestamp:             now.Add(-time.Second),
 			Object:                "responses_stream",
 			Status:                "success",
@@ -55,18 +58,19 @@ func newListPreviewStore(t *testing.T) *RDBLogStore {
 	return &RDBLogStore{db: db, logger: bifrost.NewDefaultLogger(schemas.LogLevelInfo)}
 }
 
-// 列表行的输入预览应取最后一条人类消息而非工具输出，
-// 保证无 assistant 输出的 agent 行仍能回退展示人类消息
-func TestSearchLogsListPreview(t *testing.T) {
+// session 行的输入预览应取最后一条人类消息而非工具输出，
+// 保证无 assistant 输出的 agent 行仍能回退展示人类消息；
+// responses_output 在 session 投影保持全量透传（与收敛前行为一致）
+func TestSessionLogsPreviewSelectsLastHumanMessage(t *testing.T) {
 	s := newListPreviewStore(t)
 	ctx := context.Background()
 
-	result, err := s.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})
+	session, err := s.GetSessionLogs(ctx, "list-preview-parent", PaginationOptions{Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, result.Logs, 2)
+	require.Len(t, session.Logs, 2)
 
 	byID := map[string]Log{}
-	for _, l := range result.Logs {
+	for _, l := range session.Logs {
 		byID[l.ID] = l
 	}
 
@@ -74,11 +78,11 @@ func TestSearchLogsListPreview(t *testing.T) {
 	require.Len(t, agent.ResponsesInputHistoryParsed, 1, "输入预览应只保留最后一条人类消息")
 	require.NotNil(t, agent.ResponsesInputHistoryParsed[0].Role)
 	require.Equal(t, schemas.ResponsesInputMessageRoleAssistant, *agent.ResponsesInputHistoryParsed[0].Role)
-	require.Nil(t, agent.ResponsesOutputParsed, "输出无 assistant 文本时预览应清空")
+	require.Len(t, agent.ResponsesOutputParsed, 2, "session 行 responses_output 全量透传")
 
 	plain := byID["plain-turn"]
 	require.Len(t, plain.ResponsesInputHistoryParsed, 1)
 	require.NotNil(t, plain.ResponsesInputHistoryParsed[0].Role)
 	require.Equal(t, schemas.ResponsesInputMessageRoleUser, *plain.ResponsesInputHistoryParsed[0].Role)
-	require.Len(t, plain.ResponsesOutputParsed, 1, "有 assistant 文本时输出预览应保留单条预览")
+	require.Len(t, plain.ResponsesOutputParsed, 1, "session 行 responses_output 全量透传")
 }

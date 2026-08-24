@@ -1121,7 +1121,7 @@ func (s *RDBLogStore) GetSessionLogs(ctx context.Context, sessionID string, pagi
 		dataQuery := baseQuery.Session(&gorm.Session{}).
 			WithContext(gCtx).
 			Order(orderClause).
-			Select(s.listSelectColumns()).
+			Select(s.sessionSelectColumns()).
 			Limit(limit)
 		if pagination.Offset > 0 {
 			dataQuery = dataQuery.Offset(pagination.Offset)
@@ -1251,7 +1251,24 @@ func normalizeAggregateTimestamp(value any) string {
 // 选中的输入预览消息超过 maxListInputPreviewChars 字符时以保留原 role 的
 // 最小合法占位消息替代，详情接口 FindByID 不受影响仍返回全量
 func (s *RDBLogStore) listSelectColumns() string {
-	baseCols := strings.Join([]string{
+	baseCols, inputHistoryExpr, outputMessageExpr, imageEditExpr := s.listSelectColumnsBase()
+	return baseCols + ", " + inputHistoryExpr + ", " + outputMessageExpr + ", " + imageEditExpr
+}
+
+// sessionSelectColumns 返回 session 端点（/api/logs/sessions/{id}）专用投影：
+// 在列表投影之上额外保留 responses_input_history 预览与 responses_output 裁剪，
+// 使会话视图的消息预览字段在列表收敛后仍完整下发，响应内容与收敛前一致
+func (s *RDBLogStore) sessionSelectColumns() string {
+	baseCols, inputHistoryExpr, outputMessageExpr, imageEditExpr := s.listSelectColumnsBase()
+	responsesInputExpr, responsesOutputExpr := s.responsesPreviewColumns()
+	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", " +
+		outputMessageExpr + ", " + responsesOutputExpr + ", " + imageEditExpr
+}
+
+// listSelectColumnsBase 抽出列表/session 投影共享的基础部分：
+// 标量列 + chat 输入预览表达式 + chat 输出预览表达式 + image_edit prompt 裁剪
+func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outputMessageExpr, imageEditExpr string) {
+	baseCols = strings.Join([]string{
 		"id", "parent_request_id", "timestamp", "object_type", "provider", "model", "alias",
 		"canonical_model_name", "alias_model_family", "server_side_fallback_model",
 		"number_of_retries", "fallback_index",
@@ -1281,7 +1298,6 @@ func (s *RDBLogStore) listSelectColumns() string {
 		"created_at",
 	}, ", ")
 
-	var inputHistoryExpr, responsesInputExpr string
 	switch s.db.Dialector.Name() {
 	case "postgres":
 		// Postgres jsonb rejects malformed JSON (22P02), \u0000 escapes
@@ -1297,17 +1313,12 @@ func (s *RDBLogStore) listSelectColumns() string {
 			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(input_history)
 			ELSE bifrost_safe_jsonb_preview(input_history, %d) END AS input_history`,
 			maxListInputPreviewChars)
-		responsesInputExpr = fmt.Sprintf(`CASE
-			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_input_history)
-			ELSE bifrost_safe_jsonb_preview(responses_input_history, %d) END AS responses_input_history`,
-			maxListInputPreviewChars)
 	case "clickhouse":
 		// ClickHouse: return the full history columns as-is. The last-message
 		// truncation optimization the SQLite/Postgres list path applies is
 		// deferred (correctness over payload size); hybrid offloading and
 		// content_summary already bound list payloads in practice.
 		inputHistoryExpr = `input_history AS input_history`
-		responsesInputExpr = `responses_input_history AS responses_input_history`
 	default: // sqlite
 		// 预览优先取最后一条 user/assistant 条目：末条是工具输出且本次请求无
 		// assistant 文本时，UI 仍能回退到人类消息；找不到人类条目时回退末条；
@@ -1334,6 +1345,52 @@ THEN coalesce(
 ELSE input_history END AS input_history`,
 			maxListInputPreviewChars, oversizedInputPreviewPlaceholder,
 			maxListInputPreviewChars, oversizedInputPreviewPlaceholder)
+	}
+
+	// 输出列：postgres 在 DB 内经裁剪函数取预览（消除全量读出）；
+	// realtime.turn 行走 bifrost_safe_jsonb 保持完整轮次--单元素轮次内容不变，
+	// 多元素轮次截为末条；其余方言裸读全列，由 Go 侧裁剪兑底
+	switch s.db.Dialector.Name() {
+	case "postgres":
+		outputMessageExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(output_message)
+			ELSE bifrost_safe_output_message_preview(output_message, %d) END AS output_message`,
+			maxListOutputPreviewRunes)
+		// image_edit_input 含 base64 图片，SQL 侧只取 prompt 标量字段；
+		// 空串/NULL（普通 chat 行）直接透传原值，bifrost_safe_jsonb 对空串返回空串，
+		// 直接 ::jsonb 强转会抛 22P02；以合法 JSON 注入原列名，AfterFind 反序列化后仅含 Prompt
+		imageEditExpr = `CASE WHEN image_edit_input IS NULL OR image_edit_input = '' THEN image_edit_input
+			ELSE jsonb_build_object('prompt', (bifrost_safe_jsonb(image_edit_input)::jsonb ->> 'prompt'))::text END AS image_edit_input`
+	default:
+		outputMessageExpr = "output_message"
+		imageEditExpr = "image_edit_input"
+	}
+	return
+}
+
+// responsesPreviewColumns 返回 responses 路径两个重字段的表达式：
+// responses_input_history 预览与 responses_output 裁剪。列表投影已收敛不下发这两个
+// 字段，仅 session 投影（sessionSelectColumns）继续使用
+func (s *RDBLogStore) responsesPreviewColumns() (responsesInputExpr, responsesOutputExpr string) {
+	switch s.db.Dialector.Name() {
+	case "postgres":
+		responsesInputExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_input_history)
+			ELSE bifrost_safe_jsonb_preview(responses_input_history, %d) END AS responses_input_history`,
+			maxListInputPreviewChars)
+		responsesOutputExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_output)
+			ELSE bifrost_safe_responses_output_preview(responses_output, %d) END AS responses_output`,
+			maxListOutputPreviewRunes)
+	case "clickhouse":
+		// ClickHouse: return the full history columns as-is. The last-message
+		// truncation optimization the SQLite/Postgres list path applies is
+		// deferred (correctness over payload size); hybrid offloading and
+		// content_summary already bound list payloads in practice.
+		responsesInputExpr = `responses_input_history AS responses_input_history`
+		responsesOutputExpr = `responses_output AS responses_output`
+	default: // sqlite
+		// 预览优先取最后一条 user/assistant 条目，超限时以保留原 role 的占位替代
 		responsesInputExpr = fmt.Sprintf(`CASE
 WHEN object_type = 'realtime.turn' THEN responses_input_history
 WHEN responses_input_history IS NOT NULL AND responses_input_history != '' AND responses_input_history != '[]'
@@ -1357,35 +1414,9 @@ THEN coalesce(
 ELSE responses_input_history END AS responses_input_history`,
 			maxListInputPreviewChars, oversizedInputPreviewPlaceholder,
 			maxListInputPreviewChars, oversizedInputPreviewPlaceholder)
+		responsesOutputExpr = "responses_output AS responses_output"
 	}
-
-	// 输出列：postgres 在 DB 内经裁剪函数取预览（消除全量读出）；
-	// realtime.turn 行走 bifrost_safe_jsonb 保持完整轮次——单元素轮次内容不变，
-	// 多元素轮次截为末条；其余方言裸读全列，由 Go 侧裁剪兜底
-	var outputMessageExpr, responsesOutputExpr, imageEditExpr string
-	switch s.db.Dialector.Name() {
-	case "postgres":
-		outputMessageExpr = fmt.Sprintf(`CASE
-			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(output_message)
-			ELSE bifrost_safe_output_message_preview(output_message, %d) END AS output_message`,
-			maxListOutputPreviewRunes)
-		responsesOutputExpr = fmt.Sprintf(`CASE
-			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_output)
-			ELSE bifrost_safe_responses_output_preview(responses_output, %d) END AS responses_output`,
-			maxListOutputPreviewRunes)
-		// image_edit_input 含 base64 图片，SQL 侧只取 prompt 标量字段；
-		// 空串/NULL（普通 chat 行）直接透传原值，bifrost_safe_jsonb 对空串返回空串，
-		// 直接 ::jsonb 强转会抛 22P02；以合法 JSON 注入原列名，AfterFind 反序列化后仅含 Prompt
-		imageEditExpr = `CASE WHEN image_edit_input IS NULL OR image_edit_input = '' THEN image_edit_input
-			ELSE jsonb_build_object('prompt', (bifrost_safe_jsonb(image_edit_input)::jsonb ->> 'prompt'))::text END AS image_edit_input`
-	default:
-		outputMessageExpr = "output_message"
-		responsesOutputExpr = "responses_output"
-		imageEditExpr = "image_edit_input"
-	}
-
-	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", " +
-		outputMessageExpr + ", " + responsesOutputExpr + ", " + imageEditExpr
+	return
 }
 
 // billingPayloadColumns are the payload columns cost recomputation reads to recover a

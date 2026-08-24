@@ -596,10 +596,12 @@ const maxListInputPreviewChars = 4096
 // oversizedInputPreviewPlaceholder replaces an over-cap selected message body
 const oversizedInputPreviewPlaceholder = "[preview omitted: message too large]"
 
-// trimListPayloadPreviews 将列表行的完整 payload 替换为轻量预览：输出仅保留
+// trimListPayloadPreviews 将列表行的完整 payload 替换为轻量预览：chat 输出仅保留
 // 最后一条 assistant 文本与 reasoning 摘要，Image Edit 输入仅保留 prompt
 // （剥离 base64 图片），供 UI 的 Message 列展示；realtime.turn 行保持完整
-// （日志表将其渲染为 Tool/User/Assistant 组合摘要，需要完整轮次上下文）
+// （日志表将其渲染为 Tool/User/Assistant 组合摘要，需要完整轮次上下文）。
+// responses_output 列表投影已收敛不再读出，Go 侧无需再裁剪；chat 与 image_edit
+// 的裁剪在 postgres 已于 SQL 侧完成，此处仅兜底 sqlite/clickhouse
 func trimListPayloadPreviews(logs []Log) {
 	for i := range logs {
 		if logs[i].Object == "realtime.turn" {
@@ -630,47 +632,9 @@ func trimListPayloadPreviews(logs []Log) {
 				logs[i].OutputMessageParsed = preview
 			}
 		}
-		if out := logs[i].ResponsesOutputParsed; len(out) > 0 {
-			logs[i].ResponsesOutputParsed = responsesOutputPreview(out)
-		}
+		// responses_output 列表投影已收敛不再读出，此处无需再裁剪；
+		// sqlite/clickhouse 的 chat output_message 预览与 image_edit prompt 裁剪保留兜底
 	}
-}
-
-// responsesOutputPreview 保留输出里的 assistant 文本与 reasoning 摘要条目，
-// 供 UI 的 Message 列在无 assistant 正文时以 reasoning 区分不同的请求
-func responsesOutputPreview(out []schemas.ResponsesMessage) []schemas.ResponsesMessage {
-	preview := make([]schemas.ResponsesMessage, 0, 2)
-	for i := range out {
-		msgType := schemas.ResponsesMessageTypeMessage
-		if out[i].Type != nil {
-			msgType = *out[i].Type
-		}
-		switch msgType {
-		case schemas.ResponsesMessageTypeMessage:
-			if text := truncateRunes(extractResponsesMessageText(&out[i]), maxListOutputPreviewRunes); text != "" {
-				role := schemas.ResponsesInputMessageRoleAssistant
-				content := schemas.ResponsesMessageContent{ContentStr: &text}
-				preview = append(preview, schemas.ResponsesMessage{
-					Type:    &msgType,
-					Role:    &role,
-					Content: &content,
-				})
-			}
-		case schemas.ResponsesMessageTypeReasoning:
-			// 只保留可读 summary，丢弃 encrypted_content（不可读且体积大）
-			if reasoning := out[i].ResponsesReasoning; reasoning != nil && len(reasoning.Summary) > 0 {
-				msgTypeReasoning := schemas.ResponsesMessageTypeReasoning
-				preview = append(preview, schemas.ResponsesMessage{
-					Type:                &msgTypeReasoning,
-					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: reasoning.Summary},
-				})
-			}
-		}
-	}
-	if len(preview) == 0 {
-		return nil
-	}
-	return preview
 }
 
 // chatReasoningPreview 返回 Chat 输出消息的 reasoning 可读文本（reasoning 字段优先，

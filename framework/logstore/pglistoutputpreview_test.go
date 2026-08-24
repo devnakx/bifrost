@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Postgres 列表投影输出侧 SQL 裁剪的投影断言钉子：
-// - postgres 分支必须在 DB 内用裁剪函数取 output_message / responses_output 预览，
-//   不再裸读这两条大列
-// - sqlite 分支保持裸列读出 + Go 侧 trimListPayloadPreviews 行为不变
+// 列表/session 投影输出侧的投影断言钉子：
+// - postgres 列表投影仅在 DB 内裁剪 chat output_message；responses 两列已整体收敛出列表
+// - responses 预览裁剪迁移至 sessionSelectColumns：postgres 走裁剪函数，sqlite 裸列透传
+// - sqlite 列表投影保持裸 output_message 读出 + Go 侧 trimListPayloadPreviews 兜底
 //
 // 断言用列边界正则防止函数名子串误判（如 bifrost_safe_output_message_preview 内
 // 含 "output_message" 子串）
@@ -26,19 +26,22 @@ func bareColumnRe(col string) *regexp.Regexp {
 	return regexp.MustCompile(`(^|, |\n)` + col + `( AS |,)`)
 }
 
-// TestListSelectColumnsProjectionOutputTrimming 钉住各方言 listSelectColumns 的输出列形态。
+// TestListSelectColumnsProjectionOutputTrimming 钉住各方言列表/session 投影的输出列形态。
 // 测试内以字面量固定函数名与阈值占位，不引用实现常量，保证红态可编译
 func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	pgStore, _ := setupPerfTestDB(t)
 	pgCols := pgStore.listSelectColumns()
+	pgSessionCols := pgStore.sessionSelectColumns()
 
-	sqliteCols := newProjectionTestStore(t).listSelectColumns()
+	sqliteStore := newProjectionTestStore(t)
+	sqliteCols := sqliteStore.listSelectColumns()
+	sqliteSessionCols := sqliteStore.sessionSelectColumns()
 
-	// postgres：含新裁剪函数调用，不含裸大列
+	// postgres 列表投影：仅保留 chat 输出裁剪函数，responses 两列整体移除
 	require.Contains(t, pgCols, "bifrost_safe_output_message_preview(",
 		"postgres 投影必须含 chat 输出裁剪函数调用；当前长度 %d", len(pgCols))
-	require.Contains(t, pgCols, "bifrost_safe_responses_output_preview(",
-		"postgres 投影必须含 responses 输出裁剪函数调用")
+	require.NotContains(t, pgCols, "bifrost_safe_responses_output_preview(",
+		"responses 输出裁剪已随字段收敛迁出列表投影")
 	for _, col := range []string{"output_message", "responses_output"} {
 		require.False(t, bareColumnRe(col).MatchString(pgCols),
 			"postgres 投影不得裸读 %s 列", col)
@@ -47,11 +50,17 @@ func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	require.NotContains(t, pgCols, "image_edit_input AS image_edit_input",
 		"postgres 投影不得原样透传 image_edit_input")
 
-	// 对照断言：sqlite 仍裸读两大列（Go 侧裁剪兜底），防误伤
-	for _, col := range []string{"output_message", "responses_output"} {
-		require.True(t, bareColumnRe(col).MatchString(sqliteCols),
-			"sqlite 投影必须保留裸 %s 列读出（行为不变）", col)
-	}
+	// 对照断言：sqlite 列表投影仍裸读 chat 输出列（Go 侧裁剪兜底），防误伤
+	require.True(t, bareColumnRe("output_message").MatchString(sqliteCols),
+		"sqlite 投影必须保留裸 output_message 列读出（行为不变）")
+	require.False(t, bareColumnRe("responses_output").MatchString(sqliteCols),
+		"sqlite 列表投影同样不得再下发 responses_output")
+
+	// session 投影：两方言都保留 responses 预览（postgres 走裁剪函数，sqlite 裸列）
+	require.Contains(t, pgSessionCols, "bifrost_safe_responses_output_preview(",
+		"postgres session 投影必须含 responses 输出裁剪函数调用")
+	require.True(t, bareColumnRe("responses_output").MatchString(sqliteSessionCols),
+		"sqlite session 投影必须保留裸 responses_output 列读出")
 }
 
 // TestPostgresOutputPreviewFunctionsDirect 直调两个新裁剪函数钉住各分支，

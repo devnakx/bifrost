@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Postgres 列表投影输入预览上限的行为钉子：与 SQLite 侧 listinputpreview_test.go 同语义，
-// 分层选择与占位逻辑由 bifrost_safe_jsonb_preview 纯函数承载，realtime.turn 行仍走
-// bifrost_safe_jsonb。占位文本复用同包 expectedOversizedPreview 字面量
+// Postgres session 投影输入预览上限的行为钉子：列表投影已不下发 responses_input_history，
+// 分层选择与占位逻辑由 bifrost_safe_jsonb_preview 纯函数承载并迁移至 sessionSelectColumns，
+// realtime.turn 行仍走 bifrost_safe_jsonb。占位文本复用同包 expectedOversizedPreview 字面量
 
-// TestPostgresListProjectionCapsOversizedInputMessage 超大单条输入消息在 postgres 列表投影中被占位替换且有界
-func TestPostgresListProjectionCapsOversizedInputMessage(t *testing.T) {
+// TestPostgresSessionProjectionCapsOversizedInputMessage 超大单条输入消息在 postgres session 投影中被占位替换且有界
+func TestPostgresSessionProjectionCapsOversizedInputMessage(t *testing.T) {
 	store, db := setupPerfTestDB(t)
 	ctx := context.Background()
 
@@ -44,9 +44,14 @@ func TestPostgresListProjectionCapsOversizedInputMessage(t *testing.T) {
 	result, err := store.SearchLogs(ctx, SearchFilters{ParentRequestID: parent}, PaginationOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, result.Logs, 1)
+	assert.Empty(t, result.Logs[0].ResponsesInputHistoryParsed, "列表行不得携带 responses_input_history")
 
-	got := result.Logs[0].ResponsesInputHistoryParsed
-	require.Len(t, got, 1, "列表行只应携带被选中的末条消息")
+	session, err := store.GetSessionLogs(ctx, parent, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, session.Logs, 1)
+
+	got := session.Logs[0].ResponsesInputHistoryParsed
+	require.Len(t, got, 1, "session 行只应携带被选中的末条消息")
 	require.NotNil(t, got[0].Type)
 	assert.Equal(t, schemas.ResponsesMessageTypeMessage, *got[0].Type, "responses 占位必须带 type=message")
 	require.NotNil(t, got[0].Role)
@@ -111,22 +116,24 @@ func TestPostgresListProjectionEmptyArrayRowPassthrough(t *testing.T) {
 	assert.Empty(t, result.Logs[0].InputHistoryParsed)
 }
 
-// TestPostgresListProjectionRealtimeTurnPassthrough realtime.turn 行保持完整轮次上下文
+// TestPostgresSessionProjectionRealtimeTurnPassthrough realtime.turn 行在 session 投影保持完整轮次上下文
 //
 // 接线后 realtime.turn 分支路由到 bifrost_safe_jsonb：单元素轮次经末条提取后
-// 内容不变（仅 jsonb 规范化文本），反序列化回 Go 后全量保留
-func TestPostgresListProjectionRealtimeTurnPassthrough(t *testing.T) {
+// 内容不变（仅 jsonb 规范化文本），反序列化回 Go 后全量保留；列表投影不再下发该列
+func TestPostgresSessionProjectionRealtimeTurnPassthrough(t *testing.T) {
 	store, _ := setupPerfTestDB(t)
 	ctx := context.Background()
 
 	full := strings.Repeat("r", 1<<20)
+	parent := "pg-realtime-parent"
 	entry := &Log{
-		ID:        "pg-realtime-1",
-		Timestamp: time.Now().UTC(),
-		Object:    "realtime.turn",
-		Provider:  "openai",
-		Model:     "gpt-realtime",
-		Status:    "success",
+		ID:              "pg-realtime-1",
+		ParentRequestID: &parent,
+		Timestamp:       time.Now().UTC(),
+		Object:          "realtime.turn",
+		Provider:        "openai",
+		Model:           "gpt-realtime",
+		Status:          "success",
 		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{
 			responsesMessage(schemas.ResponsesInputMessageRoleUser, full),
 		},
@@ -137,9 +144,14 @@ func TestPostgresListProjectionRealtimeTurnPassthrough(t *testing.T) {
 	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, result.Logs, 1)
+	assert.Empty(t, result.Logs[0].ResponsesInputHistoryParsed, "列表行不得携带 responses_input_history")
 
-	got := result.Logs[0].ResponsesInputHistoryParsed
-	require.Len(t, got, 1, "realtime.turn 行保持完整轮次上下文")
+	session, err := store.GetSessionLogs(ctx, parent, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, session.Logs, 1)
+
+	got := session.Logs[0].ResponsesInputHistoryParsed
+	require.Len(t, got, 1, "session 行保持完整轮次上下文")
 	require.NotNil(t, got[0].Content)
 	assertBoundedContent(t, "pg-realtime-full-turn", got[0].Content.ContentStr, full)
 }

@@ -17,7 +17,7 @@ import (
 const (
 	defaultUploadWorkers       = 10
 	defaultUploadQueueSize     = 5000
-	maxContentSummaryBytes     = 2048
+	maxContentSummaryBytes     = 512
 	defaultMaxUploadQueueBytes = 1 << 30 // 1 GiB
 )
 

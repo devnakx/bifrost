@@ -12,9 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 列表投影输入预览上限的行为钉子：超大单条输入消息在 SQL 读取阶段被替换为
+// 列表投影输入预览上限的行为钉子：超大单条 chat 输入消息在 SQL 读取阶段被替换为
 // 保留原 role 的最小合法占位消息；详情接口 FindByID 保持全量；realtime.turn 行豁免；
-// GetSessionLogs 复用列表投影故一并继承上限
+// 列表投影已不下发 responses_input_history/responses_output，session 投影独立保留
+// 两列预览并继承同一上限
 //
 // 占位文本在此以字面量固定而不引用实现常量，保证红态（常量尚未落地）可编译
 const expectedOversizedPreview = "[preview omitted: message too large]"
@@ -44,8 +45,9 @@ func assertBoundedContent(t *testing.T, label string, got *string, want string) 
 	}
 }
 
-// TestListProjectionCapsOversizedInputMessage 超大单条输入消息在列表投影中被占位替换且有界
-func TestListProjectionCapsOversizedInputMessage(t *testing.T) {
+// TestListProjectionDropsResponsesInputPayload 列表行不再下发 responses_input_history：
+// 超大载荷不得经列表响应泄漏；responses 预览裁剪行为由 session 投影用例覆盖
+func TestListProjectionDropsResponsesInputPayload(t *testing.T) {
 	store := newProjectionTestStore(t)
 	ctx := context.Background()
 
@@ -66,39 +68,31 @@ func TestListProjectionCapsOversizedInputMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Logs, 1)
 
-	got := result.Logs[0].ResponsesInputHistoryParsed
-	require.Len(t, got, 1, "列表行只应携带被选中的末条消息")
-	require.NotNil(t, got[0].Type)
-	assert.Equal(t, schemas.ResponsesMessageTypeMessage, *got[0].Type, "responses 占位必须带 type=message")
-	require.NotNil(t, got[0].Role)
-	assert.Equal(t, schemas.ResponsesInputMessageRoleUser, *got[0].Role, "占位必须保留原 role")
-	require.NotNil(t, got[0].Content)
-	assertBoundedContent(t, "responses-input-preview", got[0].Content.ContentStr, expectedOversizedPreview)
-
-	data, err := sonic.Marshal(got[0])
-	require.NoError(t, err)
-	assert.LessOrEqual(t, len(data), maxPreviewElementBytes, "单元素序列化长度须不超过 16384 字节")
+	assert.Empty(t, result.Logs[0].ResponsesInputHistoryParsed, "列表行不得携带 responses_input_history")
+	assert.Empty(t, result.Logs[0].ResponsesInputHistory, "原始列同样不得随列表读出")
 }
 
-// TestListProjectionPrefersSmallerEarlierUserMessage 末条 user/assistant 未超限时原样返回
+// TestSessionProjectionPrefersSmallerEarlierUserMessage session 投影末条 user/assistant 未超限时原样返回
 //
 // 巨型 assistant 在前、小 user 在后：被选中的是最后一条 user/assistant 条目，小 user 原文透传。
 // 小 user 长度落在 1025–4096 区间是刻意的：阈值探针把上限临时降到 1024 时，
 // 该消息同样超限被占位替换，本用例必须转红以证明阈值真实生效
-func TestListProjectionPrefersSmallerEarlierUserMessage(t *testing.T) {
+func TestSessionProjectionPrefersSmallerEarlierUserMessage(t *testing.T) {
 	store := newProjectionTestStore(t)
 	ctx := context.Background()
 
 	small := strings.Repeat("u", 2048)
 	userRole := schemas.ResponsesInputMessageRoleUser
 	msgType := schemas.ResponsesMessageTypeMessage
+	parent := "prefer-parent-1"
 	entry := &Log{
-		ID:        "prefer-1",
-		Timestamp: time.Now().UTC(),
-		Object:    "chat.completion",
-		Provider:  "openai",
-		Model:     "gpt-4o-mini",
-		Status:    "success",
+		ID:              "prefer-1",
+		ParentRequestID: &parent,
+		Timestamp:       time.Now().UTC(),
+		Object:          "chat.completion",
+		Provider:        "openai",
+		Model:           "gpt-4o-mini",
+		Status:          "success",
 		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{
 			responsesMessage(schemas.ResponsesInputMessageRoleAssistant, strings.Repeat("a", 1<<20)),
 			{
@@ -111,12 +105,12 @@ func TestListProjectionPrefersSmallerEarlierUserMessage(t *testing.T) {
 	require.NoError(t, entry.SerializeFields())
 	require.NoError(t, store.Create(ctx, entry))
 
-	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 1})
+	session, err := store.GetSessionLogs(ctx, parent, PaginationOptions{Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, result.Logs, 1)
+	require.Len(t, session.Logs, 1)
 
-	got := result.Logs[0].ResponsesInputHistoryParsed
-	require.Len(t, got, 1, "列表行只应携带被选中的末条 user/assistant 消息")
+	got := session.Logs[0].ResponsesInputHistoryParsed
+	require.Len(t, got, 1, "session 行只应携带被选中的末条 user/assistant 消息")
 	require.NotNil(t, got[0].Role)
 	assert.Equal(t, schemas.ResponsesInputMessageRoleUser, *got[0].Role)
 	require.NotNil(t, got[0].Content)
@@ -181,14 +175,17 @@ func TestDetailUnaffectedByListCap(t *testing.T) {
 	assertBoundedContent(t, "detail-full-payload", detail.ResponsesInputHistoryParsed[0].Content.ContentStr, full)
 }
 
-// TestRealtimeTurnExemptFromCap realtime.turn 行整行透传不裁剪
-func TestRealtimeTurnExemptFromCap(t *testing.T) {
+// TestRealtimeTurnOnlyOnSessionProjection realtime.turn 完整轮次不再走列表投影，
+// 仅 session 投影保持整轮透传不裁剪
+func TestRealtimeTurnOnlyOnSessionProjection(t *testing.T) {
 	store := newProjectionTestStore(t)
 	ctx := context.Background()
 
 	full := strings.Repeat("r", 1<<20)
+	parent := "rt-parent-1"
 	entry := &Log{
 		ID:                          "rt-1",
+		ParentRequestID:             &parent,
 		Timestamp:                   time.Now().UTC(),
 		Object:                      "realtime.turn",
 		Provider:                    "openai",
@@ -202,9 +199,14 @@ func TestRealtimeTurnExemptFromCap(t *testing.T) {
 	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 1})
 	require.NoError(t, err)
 	require.Len(t, result.Logs, 1)
+	assert.Empty(t, result.Logs[0].ResponsesInputHistoryParsed, "列表行不得携带 responses_input_history")
 
-	got := result.Logs[0].ResponsesInputHistoryParsed
-	require.Len(t, got, 1, "realtime.turn 行保持完整轮次上下文")
+	session, err := store.GetSessionLogs(ctx, parent, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, session.Logs, 1)
+
+	got := session.Logs[0].ResponsesInputHistoryParsed
+	require.Len(t, got, 1, "session 行保持完整轮次上下文")
 	require.NotNil(t, got[0].Content)
 	assertBoundedContent(t, "realtime-full-turn", got[0].Content.ContentStr, full)
 }
