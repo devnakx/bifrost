@@ -7,12 +7,18 @@ function ScrollArea({
 	className,
 	viewportClassName,
 	bidirectionalScroll,
+	viewportRef,
 	children,
 	...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & { viewportClassName?: string; bidirectionalScroll?: boolean }) {
+}: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
+	viewportClassName?: string;
+	bidirectionalScroll?: boolean;
+	viewportRef?: React.RefObject<HTMLDivElement | null>;
+}) {
 	return (
 		<ScrollAreaPrimitive.Root data-slot="scroll-area" className={cn("relative", className)} {...props}>
 			<ScrollAreaPrimitive.Viewport
+				ref={viewportRef}
 				data-slot="scroll-area-viewport"
 				className={cn(
 					"focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1",

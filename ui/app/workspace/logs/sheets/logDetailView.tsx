@@ -42,14 +42,16 @@ import {
 import { BatchRequestCounts, ContentBlock, LogEntry, OverheadBucket, ResponsesMessage } from "@/lib/types/logs";
 import { useGetUserAgentMappingsQuery } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { useLazyGetLogRawQuery } from "@/lib/store/apis/logsApi";
 import { downloadAsJson } from "@/lib/utils/browser-download";
+import { getApiBaseUrl } from "@/lib/utils/port";
 import { formatCompactNumber } from "@/lib/utils/numbers";
 import { applyRedactionMapping, hasRedactionMappingEntries } from "@/lib/utils/redaction";
 import { isJson } from "@/lib/utils/validation";
 import { Link } from "@tanstack/react-router";
 import { addMilliseconds, format } from "date-fns";
 import { AlertCircle, ChevronDown, Clipboard, Copy, Download, Loader2, MoreVertical, Trash2, Wrench, X } from "lucide-react";
-import { useMemo, useEffect, useState, type ReactNode } from "react";
+import { useMemo, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import BlockHeader from "../views/blockHeader";
 import CollapsibleBox from "../views/collapsibleBox";
@@ -842,6 +844,11 @@ interface LogDetailViewProps {
 	onClose?: () => void;
 	headerAction?: ReactNode;
 	onFilterByParentRequestId?: (parentRequestId: string) => void;
+	paginatedMessages?: unknown[];
+	hasMoreMessages?: boolean;
+	isFetchingMoreMessages?: boolean;
+	sentinelRef?: React.RefObject<HTMLDivElement | null>;
+	onLoadMore?: () => void;
 }
 
 export function LogDetailView({
@@ -853,17 +860,41 @@ export function LogDetailView({
 	onClose,
 	headerAction,
 	onFilterByParentRequestId,
+	paginatedMessages,
+	hasMoreMessages,
+	isFetchingMoreMessages,
+	sentinelRef,
+	onLoadMore,
 }: LogDetailViewProps) {
 	const { copy: copyBody } = useCopyToClipboard({
 		successMessage: "Request body copied to clipboard",
 		errorMessage: "Failed to copy request body",
 	});
 	const [showRevealedValues, setShowRevealedValues] = useState(false);
-	const revealMapping = log?.redaction_mapping;
+	// raw 懒加载：首次展开 raw tab 才请求
+	const [triggerRaw, { data: rawData, isFetching: isRawFetching }] = useLazyGetLogRawQuery();
+	const rawTabActiveRef = useRef(false);
+	const hasFetchedRawRef = useRef(false);
+	// 有效 redaction mapping 优先来自 raw 端点
+	const effectiveRedactionMapping = rawData?.redaction_mapping ?? log?.redaction_mapping;
+	const revealMapping = effectiveRedactionMapping;
 	const revealAvailable = canReveal && hasRedactionMappingEntries(revealMapping);
 	const revealEnabled = revealAvailable && showRevealedValues;
 	const activeInputRevealMapping = revealEnabled ? revealMapping?.input : undefined;
 	const activeOutputRevealMapping = revealEnabled ? revealMapping?.output : undefined;
+	// 分页消息：当 paginatedMessages 有数据时优先展示（responses/chat 统一归一化）
+	const hasPaginatedMessages = Array.isArray(paginatedMessages) && paginatedMessages.length > 0;
+	// raw 首次加载触发
+	const ensureRawFetched = () => {
+		if (!log?.id) return;
+		if (hasFetchedRawRef.current) return;
+		hasFetchedRawRef.current = true;
+		triggerRaw(log.id);
+	};
+	useEffect(() => {
+		hasFetchedRawRef.current = false;
+		rawTabActiveRef.current = false;
+	}, [log?.id]);
 
 	useEffect(() => {
 		setShowRevealedValues(false);
@@ -1041,8 +1072,10 @@ export function LogDetailView({
 	}
 
 	const audioFormat = (log.params as any)?.audio?.format || (log.params as any)?.extra_params?.audio?.format || undefined;
-	const rawRequest = applyRedactionMapping(log.raw_request, activeInputRevealMapping);
-	const rawResponse = applyRedactionMapping(log.raw_response, activeOutputRevealMapping);
+	const effectiveRawRequest = rawData?.raw_request ?? log.raw_request;
+	const effectiveRawResponse = rawData?.raw_response ?? log.raw_response;
+	const rawRequest = applyRedactionMapping(effectiveRawRequest, activeInputRevealMapping);
+	const rawResponse = applyRedactionMapping(effectiveRawResponse, activeOutputRevealMapping);
 	const passthroughRequestBody = applyRedactionMapping(log.passthrough_request_body, activeInputRevealMapping);
 	const passthroughResponseBody = applyRedactionMapping(log.passthrough_response_body, activeOutputRevealMapping);
 	const videoOutput = log.video_generation_output || log.video_retrieve_output || log.video_download_output || log.video_delete_output;
@@ -1100,7 +1133,58 @@ export function LogDetailView({
 										</DropdownMenuItem>
 									)}
 									<DropdownMenuItem
-										onClick={() => downloadAsJson(log, `log-${log.id ?? "export"}.json`)}
+										onClick={async () => {
+											try {
+												let raw = rawData;
+												if (!raw && log?.id) {
+													try {
+														raw = await triggerRaw(log.id).unwrap();
+													} catch {}
+												}
+												let allMessages: unknown[] = Array.isArray(paginatedMessages) ? [...(paginatedMessages as unknown[])] : [];
+												const base = getApiBaseUrl();
+												if (log?.id) {
+													const needFetch = hasMoreMessages || allMessages.length === 0;
+													if (needFetch) {
+														let offset = allMessages.length;
+														let hasMore = hasMoreMessages ?? true;
+														if (allMessages.length === 0) {
+															hasMore = true;
+															offset = 0;
+														}
+														while (hasMore) {
+															const resp = await fetch(`${base}/logs/${encodeURIComponent(log.id)}/messages?offset=${offset}&limit=100`, {
+																credentials: "include",
+															});
+															if (!resp.ok) break;
+															const json = await resp.json();
+															const msgs: unknown[] = json.messages ?? [];
+															if (allMessages.length === 0 && offset === 0) {
+																allMessages = msgs;
+															} else {
+																allMessages = [...allMessages, ...msgs];
+															}
+															hasMore = Boolean(json.has_more);
+															if (!msgs.length) break;
+															offset += msgs.length;
+															if (!hasMore) break;
+														}
+													}
+												}
+												const merged: Record<string, unknown> = {
+													...log,
+													raw_request: raw?.raw_request ?? log.raw_request,
+													raw_response: raw?.raw_response ?? log.raw_response,
+													redaction_mapping: raw?.redaction_mapping ?? log.redaction_mapping,
+												};
+												if (allMessages.length > 0) {
+													(merged as any).messages = allMessages;
+												}
+												downloadAsJson(merged, `log-${log.id ?? "export"}.json`);
+											} catch {
+												toast.error("Export failed");
+											}
+										}}
 										data-testid="logdetails-export-log-button"
 									>
 										<Download className="h-4 w-4" />
@@ -2206,7 +2290,17 @@ export function LogDetailView({
 						)}
 				</div>
 			</details>
-			<Tabs key={log.id} defaultValue={batchDebug ? "details" : showTabs ? "messages" : "plugins"} className="gap-2">
+			<Tabs
+				key={log.id}
+				defaultValue={batchDebug ? "details" : showTabs ? "messages" : "plugins"}
+				className="gap-2"
+				onValueChange={(v) => {
+					if (v === "raw" && !rawTabActiveRef.current) {
+						rawTabActiveRef.current = true;
+						ensureRawFetched();
+					}
+				}}
+			>
 				<TabsList className="bg-muted/60 h-10 w-fit">
 					{showTabs && batchDebug && (
 						<TabsTrigger value="details" className="px-3">
@@ -2468,6 +2562,76 @@ export function LogDetailView({
 							</DropdownMenuContent>
 						</DropdownMenu>
 					</div>
+					{hasPaginatedMessages ? (
+						<div className="bg-card rounded-sm border p-5">
+							<div className="text-muted-foreground mb-3 text-[10.5px] font-semibold tracking-wider uppercase">
+								Messages (paginated · {paginatedMessages.length}
+								{hasMoreMessages ? "+" : ""})
+							</div>
+							<div className="space-y-3">
+								{(paginatedMessages as any[]).map((msg: any, idx: number) => {
+									const isChatLike = msg && typeof msg.role === "string";
+									if (isChatLike) {
+										const role = ((msg.role as string) || "user") as MessageRole;
+										if (visibleRoles.size < 5 && !visibleRoles.has(role) && !(role === "assistant" && visibleRoles.has("assistant")))
+											return null;
+										const text = extractMessageText(msg, activeInputRevealMapping) || extractMessageText(msg, activeOutputRevealMapping);
+										const reasoningText = extractChatReasoning(msg, activeInputRevealMapping);
+										return (
+											<div key={idx}>
+												{reasoningText && (visibleRoles.has("reasoning") || visibleRoles.size === 5) ? (
+													<MessageRow role="reasoning" meta="reasoning">
+														<CollapsibleCode text={reasoningText} preview={3} mono={false} />
+													</MessageRow>
+												) : null}
+												<MessageRow role={role} last={idx === (paginatedMessages as any[]).length - 1 && !hasMoreMessages}>
+													{text ? (
+														<CollapsibleCode text={text} preview={3} mono={false} />
+													) : (
+														<LogChatMessageView message={msg} audioFormat={audioFormat} />
+													)}
+												</MessageRow>
+											</div>
+										);
+									}
+									const rRole = getResponsesRole(msg as any);
+									if (visibleRoles.size < 5 && !visibleRoles.has(rRole)) return null;
+									const text = extractResponsesText(msg as any, rRole === "reasoning" ? undefined : activeInputRevealMapping);
+									const reasoning = rRole === "reasoning" ? extractReasoningParts(msg as any, activeInputRevealMapping) : null;
+									return (
+										<MessageRow key={idx} role={rRole} last={idx === (paginatedMessages as any[]).length - 1 && !hasMoreMessages}>
+											{reasoning ? (
+												<div className="space-y-2">
+													{reasoning.contentText ? <CollapsibleCode text={reasoning.contentText} preview={3} mono={false} /> : null}
+													{reasoning.summaries.map((s: string, i: number) => (
+														<CollapsibleCode key={i} text={s} preview={3} mono={false} />
+													))}
+												</div>
+											) : text ? (
+												<CollapsibleCode text={text} preview={3} mono={false} />
+											) : (
+												<div className="text-muted-foreground text-xs">No content</div>
+											)}
+										</MessageRow>
+									);
+								})}
+							</div>
+							{hasMoreMessages ? (
+								<div className="flex items-center justify-center gap-2 pt-3">
+									{isFetchingMoreMessages ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+									<button
+										type="button"
+										onClick={() => onLoadMore?.()}
+										disabled={isFetchingMoreMessages}
+										className="text-primary text-xs hover:underline disabled:opacity-50"
+									>
+										Load more
+									</button>
+								</div>
+							) : null}
+							<div ref={sentinelRef} className="h-px w-full" />
+						</div>
+					) : null}
 					{(log.ocr_input || log.ocr_output) && <OCRView ocrInput={log.ocr_input} ocrOutput={log.ocr_output} />}
 					{(log.speech_input || log.speech_output) && (
 						<SpeechView speechInput={log.speech_input} speechOutput={log.speech_output} isStreaming={log.stream} />
@@ -3139,6 +3303,12 @@ export function LogDetailView({
 				</TabsContent>
 
 				<TabsContent value="raw" className="space-y-3">
+					{isRawFetching ? (
+						<div className="flex items-center justify-center py-8">
+							<Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
+							<span className="text-muted-foreground ml-2 text-sm">Loading raw payload...</span>
+						</div>
+					) : null}
 					{rawRequest && (
 						<>
 							<div className="text-muted-foreground text-[12px]">
@@ -3201,7 +3371,7 @@ export function LogDetailView({
 							</CollapsibleBox>
 						</>
 					)}
-					{!rawRequest && !rawResponse && !passthroughRequestBody && !passthroughResponseBody && (
+					{!isRawFetching && !rawRequest && !rawResponse && !passthroughRequestBody && !passthroughResponseBody && (
 						<div className="text-muted-foreground rounded-sm border border-dashed p-5 text-center text-sm">No raw JSON available.</div>
 					)}
 				</TabsContent>

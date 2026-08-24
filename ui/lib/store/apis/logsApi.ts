@@ -19,11 +19,26 @@ import {
 	RankingDimension,
 	RecalcJobStatus,
 	RecalculateCostResponse,
+	RedactionMapping,
 	ThroughputHistogramResponse,
 	TokenHistogramResponse,
 } from "@/lib/types/logs";
 import { baseApi } from "./baseApi";
 import { RoutingRule } from "@/lib/types/routingRules";
+
+export interface LogMessagesResponse {
+	messages: unknown[];
+	offset: number;
+	limit: number;
+	total: number;
+	has_more: boolean;
+}
+
+export interface LogRawResponse {
+	raw_request: string;
+	raw_response: string;
+	redaction_mapping?: RedactionMapping;
+}
 
 // Helper function to build filter params
 function buildFilterParams(filters: LogFilters): Record<string, string | number> {
@@ -446,10 +461,32 @@ export const logsApi = baseApi.injectEndpoints({
 			invalidatesTags: ["Logs"],
 		}),
 
-		// Get a single log entry by ID (includes raw_request and raw_response)
+		// Get a single log entry by ID (metadata slim - heavy fields via dedicated endpoints)
 		getLogById: builder.query<LogEntry, string>({
 			query: (id) => `/logs/${encodeURIComponent(id)}`,
 			providesTags: (result, error, id) => [{ type: "Logs", id }],
+		}),
+
+		// Paginated messages for a log - infinite scroll (RTK 2.8.2 infiniteQuery)
+		getLogMessages: builder.infiniteQuery<LogMessagesResponse, string, number>({
+			infiniteQueryOptions: {
+				initialPageParam: 0,
+				getNextPageParam: (lastPage, _allPages, lastPageParam) => {
+					if (!lastPage.has_more) return undefined;
+					return lastPageParam + lastPage.messages.length;
+				},
+			},
+			query: ({ queryArg, pageParam }) => ({
+				url: `/logs/${encodeURIComponent(queryArg)}/messages`,
+				params: { offset: pageParam, limit: 20 },
+			}),
+			providesTags: (_result, _error, id) => [{ type: "LogMessages", id }],
+		}),
+
+		// Raw request/response + redaction mapping - lazy loaded on demand
+		getLogRaw: builder.query<LogRawResponse, string>({
+			query: (id) => `/logs/${encodeURIComponent(id)}/raw`,
+			providesTags: (_result, _error, id) => [{ type: "LogRaw", id }],
 		}),
 	}),
 });
@@ -495,4 +532,7 @@ export const {
 	useCancelRecalculateCostJobMutation,
 	useLazyGetLogByIdQuery,
 	useGetLogByIdQuery,
+	useGetLogMessagesInfiniteQuery,
+	useGetLogRawQuery,
+	useLazyGetLogRawQuery,
 } = logsApi;

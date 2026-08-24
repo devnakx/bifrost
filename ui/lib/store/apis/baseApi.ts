@@ -141,6 +141,8 @@ export const baseApi = createApi({
 	baseQuery: baseQueryWithErrorHandling,
 	tagTypes: [
 		"Logs",
+		"LogMessages",
+		"LogRaw",
 		"MCPLogs",
 		"Providers",
 		"MCPClients",
