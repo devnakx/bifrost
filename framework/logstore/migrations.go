@@ -295,6 +295,7 @@ var logstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"logs_recreate_matviews_with_cost_breakdown"}, run: migrationRecreateMatViewsWithCostBreakdown},
 	{IDs: []string{"logs_add_overhead_breakdown_column"}, run: migrationAddOverheadBreakdownColumn},
 	{IDs: []string{"logs_add_safe_jsonb_preview_function"}, run: migrationAddSafeJsonbPreviewFunction},
+	{IDs: []string{"logs_add_safe_output_preview_functions"}, run: migrationAddSafeOutputPreviewFunctions},
 }
 
 // areThereAnyPendingMigrations returns true if there are any pending migrations to be applied.
@@ -3953,6 +3954,128 @@ $$ LANGUAGE plpgsql;`
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error while adding bifrost_safe_jsonb_preview function: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddSafeOutputPreviewFunctions installs two PL/pgSQL pure helpers the
+// /api/logs list query uses to bound output payloads on the Postgres branch:
+//
+//   - bifrost_safe_output_message_preview: chat 输出，取末条 assistant 消息的
+//     正文文本 + reasoning 可读文本，超 cap_chars 即截断
+//   - bifrost_safe_responses_output_preview: responses 输出，取末条 message
+//     条目文本 + 末条 reasoning summary 文本
+//
+// 畸形 JSON、非数组、空数组一律原文透传；NULL 返回 NULL。
+func migrationAddSafeOutputPreviewFunctions(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "logs_add_safe_output_preview_functions"
+	logger.Info("[logstore] starting migration %s", migrationName)
+	defer logger.Info("[logstore] finished migration %s", migrationName)
+	opts := *migrator.DefaultOptions
+	opts.UseTransaction = true
+	m := migrator.New(db, &opts, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			if tx.Dialector.Name() != "postgres" {
+				return nil
+			}
+			tx = tx.WithContext(ctx)
+			stmt := `CREATE OR REPLACE FUNCTION bifrost_last_jsonb_text(e jsonb, keys text[]) RETURNS text AS $$
+DECLARE k text; v text;
+BEGIN
+  IF e IS NULL THEN RETURN NULL; END IF;
+  FOREACH k IN ARRAY keys LOOP
+    v := e ->> k;
+    IF v IS NOT NULL AND v <> '' THEN RETURN v; END IF;
+  END LOOP;
+  -- content 为分块数组时取末个 text 块
+  IF jsonb_typeof(e -> 'content') = 'array' THEN
+    SELECT b ->> 'text' INTO v FROM jsonb_array_elements(e -> 'content') b
+    WHERE jsonb_typeof(b -> 'text') = 'string' AND b ->> 'text' <> '' LIMIT 1;
+    RETURN v;
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION bifrost_safe_output_message_preview(t text, cap_chars int) RETURNS text AS $$
+DECLARE j jsonb; m jsonb; txt text; reasoning text; out jsonb;
+BEGIN
+  IF t IS NULL OR t = '' OR left(btrim(t), 1) <> '{' THEN RETURN t; END IF;
+  BEGIN j := t::jsonb; EXCEPTION WHEN OTHERS THEN RETURN t; END;
+  IF jsonb_typeof(j) IS DISTINCT FROM 'object' THEN RETURN t; END IF;
+  m := j -> 'message';
+  IF m IS NULL OR jsonb_typeof(m) IS DISTINCT FROM 'object' THEN m := j; END IF;
+  txt := bifrost_last_jsonb_text(m, ARRAY['reasoning_content', 'content']);
+  IF txt IS NULL THEN
+    SELECT d ->> 'text' INTO txt FROM jsonb_array_elements(COALESCE(m -> 'reasoning_details', '[]'::jsonb)) d
+    WHERE COALESCE(d ->> 'type', '') LIKE 'reasoning.%' LIMIT 1;
+  END IF;
+  reasoning := bifrost_last_jsonb_text(m, ARRAY['reasoning', 'reasoning_content']);
+  IF reasoning IS NOT NULL AND char_length(reasoning) > cap_chars THEN reasoning := left(reasoning, cap_chars); END IF;
+  IF txt IS NOT NULL AND char_length(txt) > cap_chars THEN txt := left(txt, cap_chars); END IF;
+  out := jsonb_build_object('role', COALESCE(m ->> 'role', 'assistant'), 'content', COALESCE(txt, ''));
+  IF reasoning IS NOT NULL AND reasoning <> '' THEN out := jsonb_set(out, '{reasoning}', to_jsonb(reasoning)); END IF;
+  RETURN out::text;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION bifrost_safe_responses_output_preview(t text, cap_chars int) RETURNS text AS $$
+DECLARE j jsonb; n int; i int; e jsonb; msg jsonb; txt text; summ text; res jsonb;
+BEGIN
+  IF t IS NULL OR t = '' OR left(btrim(t), 1) <> '[' THEN RETURN t; END IF;
+  BEGIN j := t::jsonb; EXCEPTION WHEN OTHERS THEN RETURN t; END;
+  IF jsonb_typeof(j) IS DISTINCT FROM 'array' OR jsonb_array_length(j) = 0 THEN RETURN t; END IF;
+  n := jsonb_array_length(j);
+  FOR i IN REVERSE n..1 LOOP
+    e := j -> (i - 1);
+    IF COALESCE(e ->> 'type', 'message') = 'message' THEN
+      txt := bifrost_last_jsonb_text(e, ARRAY['content']);
+      EXIT WHEN txt IS NOT NULL;
+    END IF;
+  END LOOP;
+  FOR i IN REVERSE n..1 LOOP
+    e := j -> (i - 1);
+    IF e ->> 'type' = 'reasoning' THEN
+      SELECT s ->> 'text' INTO summ FROM jsonb_array_elements(e -> 'summary') s LIMIT 1;
+      EXIT WHEN summ IS NOT NULL;
+    END IF;
+  END LOOP;
+  IF txt IS NULL AND summ IS NULL THEN RETURN t; END IF;
+  IF txt IS NOT NULL AND char_length(txt) > cap_chars THEN txt := left(txt, cap_chars); END IF;
+  IF summ IS NOT NULL AND char_length(summ) > cap_chars THEN summ := left(summ, cap_chars); END IF;
+  res := '[]'::jsonb;
+  IF txt IS NOT NULL THEN
+    res := jsonb_insert(res, '{1}',
+      jsonb_build_object('type', 'message', 'role', 'assistant',
+                         'content', jsonb_build_object('content', txt)));
+  END IF;
+  IF summ IS NOT NULL THEN
+    res := jsonb_insert(res, '{1}',
+      jsonb_build_object('type', 'reasoning',
+                         'summary', jsonb_build_array(jsonb_build_object('type', 'summary_text', 'text', summ))));
+  END IF;
+  RETURN res::text;
+END;
+$$ LANGUAGE plpgsql;`
+			if err := tx.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("failed to create safe output preview functions: %w", err)
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if err := tx.Exec("DROP FUNCTION IF EXISTS bifrost_safe_responses_output_preview(text, int)").Error; err != nil {
+				return err
+			}
+			if err := tx.Exec("DROP FUNCTION IF EXISTS bifrost_safe_output_message_preview(text, int)").Error; err != nil {
+				return err
+			}
+			return tx.Exec("DROP FUNCTION IF EXISTS bifrost_last_jsonb_text(jsonb, text[])").Error
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while adding safe output preview functions: %s", err.Error())
 	}
 	return nil
 }

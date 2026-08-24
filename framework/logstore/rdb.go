@@ -1240,11 +1240,10 @@ func normalizeAggregateTimestamp(value any) string {
 // detail TEXT columns and uses SQL JSON functions to extract only the last
 // element from input_history and responses_input_history arrays.
 //
-// Output columns (output_message, responses_output) are selected in full and
-// trimmed in Go after the query (trimListOutputPreviews) down to the last
-// assistant message text: extracting that preview in SQL would need
-// dialect-specific JSON path logic per dialect, while the Go trim keeps the
-// /api/logs response body small with one shared code path.
+// Output columns: postgres extracts the preview in SQL via
+// bifrost_safe_output_message_preview / bifrost_safe_responses_output_preview
+// so the full blobs never leave the database; other dialects still select the
+// columns in full and trim in Go (trimListPayloadPreviews).
 //
 // Realtime turn rows are kept intact because the logs table renders them as a
 // combined Tool/User/Assistant summary and needs the full turn context.
@@ -1360,8 +1359,33 @@ ELSE responses_input_history END AS responses_input_history`,
 			maxListInputPreviewChars, oversizedInputPreviewPlaceholder)
 	}
 
-	// 输出列全量读出，由 trimListOutputPreviews 在 Go 侧裁剪为助手预览
-	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", output_message, responses_output"
+	// 输出列：postgres 在 DB 内经裁剪函数取预览（消除全量读出）；
+	// realtime.turn 行走 bifrost_safe_jsonb 保持完整轮次——单元素轮次内容不变，
+	// 多元素轮次截为末条；其余方言裸读全列，由 Go 侧裁剪兜底
+	var outputMessageExpr, responsesOutputExpr, imageEditExpr string
+	switch s.db.Dialector.Name() {
+	case "postgres":
+		outputMessageExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(output_message)
+			ELSE bifrost_safe_output_message_preview(output_message, %d) END AS output_message`,
+			maxListOutputPreviewRunes)
+		responsesOutputExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_output)
+			ELSE bifrost_safe_responses_output_preview(responses_output, %d) END AS responses_output`,
+			maxListOutputPreviewRunes)
+		// image_edit_input 含 base64 图片，SQL 侧只取 prompt 标量字段；
+		// 空串/NULL（普通 chat 行）直接透传原值，bifrost_safe_jsonb 对空串返回空串，
+		// 直接 ::jsonb 强转会抛 22P02；以合法 JSON 注入原列名，AfterFind 反序列化后仅含 Prompt
+		imageEditExpr = `CASE WHEN image_edit_input IS NULL OR image_edit_input = '' THEN image_edit_input
+			ELSE jsonb_build_object('prompt', (bifrost_safe_jsonb(image_edit_input)::jsonb ->> 'prompt'))::text END AS image_edit_input`
+	default:
+		outputMessageExpr = "output_message"
+		responsesOutputExpr = "responses_output"
+		imageEditExpr = "image_edit_input"
+	}
+
+	return baseCols + ", " + inputHistoryExpr + ", " + responsesInputExpr + ", " +
+		outputMessageExpr + ", " + responsesOutputExpr + ", " + imageEditExpr
 }
 
 // billingPayloadColumns are the payload columns cost recomputation reads to recover a
