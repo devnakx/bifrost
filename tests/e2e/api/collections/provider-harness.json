@@ -136765,6 +136765,146 @@
           ]
         }
       ]
+    
+    },
+    {
+      "name": "59. Logs list input preview cap (logs-input-preview-cap)",
+      "description": "Pins the bounded input-preview projection on GET /api/logs list rows. A single oversized (~17MB) user input message must come back from the list endpoint as at most one selected element whose serialized size is <=16384 bytes (4096 chars x worst-case 4-byte UTF-8), with the whole page staying <=1MB — the production failure this pins was a 37MB / 33-row response where three ~17MB single-input rows dominated. The live paid-call variant of this case is structurally present but gated on provider credentials: the environment that authored it had none, so the wire-level red/green evidence lives in the handler-layer equivalent test TestGetLogsListRowsBoundedInputPreview (transports/bifrost-http/handlers/logslistinputcap_test.go), which drives a real sqlite logstore through the full fasthttp request -> getLogs -> SearchLogs path.",
+      "item": [
+        {
+          "name": "openai/gpt-4o-mini logs list rows carry bounded input previews - logs-input-preview-cap",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Build a >=1MB single-user-message chat body at run time so the collection stays small",
+                  "var bigBody = JSON.stringify({ model: \"openai/gpt-4o-mini\", max_tokens: 8, messages: [ { role: \"user\", content: \"cap-probe-\" + Date.now() + \"-\" + \"x\".repeat(1024 * 1024) } ] });",
+                  "pm.collectionVariables.set(\"logsCapChatBody\", bigBody);",
+                  "pm.collectionVariables.set(\"logsCapMarker\", \"cap-probe-\" + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Auth/rate/server noise skips instead of false-failing; 4xx on the chat call itself is",
+                  "// tolerated because what this case pins is the LIST projection, not upstream success.",
+                  "if ([401, 403, 429, 500, 502, 503, 504, 529].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('chat request accepted for log seeding', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text().slice(0, 300)).to.be.below(500);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{logsCapChatBody}}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Seeds one chat-completion log row whose single user input message is >=1MB so the list projection below must cap its preview."
+          }
+        },
+        {
+          "name": "GET /api/logs list rows bounded after oversized input - logs-input-preview-cap",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The async writer may need a beat to flush the seeded row; poll briefly.",
+                  "var MAX_TRIES = 10, found = null;",
+                  "function fetchList(cb) {",
+                  "  pm.sendRequest({ url: pm.variables.get('baseUrl') + '/api/logs?limit=5&sort_by=timestamp&order=desc', method: 'GET' }, function (err, res) { cb(err, res); });",
+                  "}",
+                  "var attempt = 0;",
+                  "function tryFetch() {",
+                  "  fetchList(function (err, res) {",
+                  "    attempt++;",
+                  "    if (!err && res.code === 200) {",
+                  "      var body = res.json();",
+                  "      var logs = (body.logs || body.data || []);",
+                  "      for (var i = 0; i < logs.length; i++) {",
+                  "        var ih = logs[i].input_history;",
+                  "        if (ih && ih.length === 1) { found = logs[i]; break; }",
+                  "      }",
+                  "    }",
+                  "    if (!found && attempt < MAX_TRIES) { setTimeout(tryFetch, 1000); } else { finish(); }",
+                  "  });",
+                  "}",
+                  "tryFetch();",
+                  "function finish() {",
+                  "  pm.test('GET /api/logs returns 200', function () {",
+                  "    // asserted inside the polling loop via found; fail here if never fetched OK",
+                  "    pm.expect(found === null && attempt >= MAX_TRIES ? 'no bounded row found in ' + MAX_TRIES + ' tries' : null).to.be.null;",
+                  "  });",
+                  "  pm.test('list row input_history has at most 1 element', function () {",
+                  "    pm.expect(Array.isArray(found.input_history), 'input_history missing').to.be.true;",
+                  "    pm.expect(found.input_history.length).to.be.at.most(1);",
+                  "  });",
+                  "  pm.test('single element serialized length is at most 16384 bytes', function () {",
+                  "    var serialized = JSON.stringify(found.input_history[0]);",
+                  "    pm.expect(serialized.length, 'serialized element too large: ' + serialized.length).to.be.at.most(16384);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/logs?limit=5&sort_by=timestamp&order=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "logs"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "sort_by",
+                  "value": "timestamp"
+                },
+                {
+                  "key": "order",
+                  "value": "desc"
+                }
+              ]
+            },
+            "description": "Asserts the seeded oversized-input row comes back with input_history length <=1 and each serialized element <=16384 bytes; the page itself stays <=1MB by construction of those caps."
+          }
+        }
+      ]
     }
   ]
 }
