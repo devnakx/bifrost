@@ -1290,14 +1290,18 @@ func (s *RDBLogStore) listSelectColumns() string {
 		// would otherwise abort the whole list query. bifrost_safe_jsonb
 		// wraps the cast in an EXCEPTION block and returns the raw TEXT on
 		// any parse failure; see migrationAddSafeJsonbFunction.
-		inputHistoryExpr = `CASE
-			WHEN object_type = 'realtime.turn' THEN input_history
-			ELSE bifrost_safe_jsonb(input_history)
-			END AS input_history`
-		responsesInputExpr = `CASE
-			WHEN object_type = 'realtime.turn' THEN responses_input_history
-			ELSE bifrost_safe_jsonb(responses_input_history)
-			END AS responses_input_history`
+		//
+		// 非 realtime.turn 行走 bifrost_safe_jsonb_preview：与 SQLite 分支同语义，
+		// 被选中的输入预览消息超 maxListInputPreviewChars（octet_length 字节口径
+		// 近似 SQLite length() 字符数）时以保留原 role 的占位替代
+		inputHistoryExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(input_history)
+			ELSE bifrost_safe_jsonb_preview(input_history, %d) END AS input_history`,
+			maxListInputPreviewChars)
+		responsesInputExpr = fmt.Sprintf(`CASE
+			WHEN object_type = 'realtime.turn' THEN bifrost_safe_jsonb(responses_input_history)
+			ELSE bifrost_safe_jsonb_preview(responses_input_history, %d) END AS responses_input_history`,
+			maxListInputPreviewChars)
 	case "clickhouse":
 		// ClickHouse: return the full history columns as-is. The last-message
 		// truncation optimization the SQLite/Postgres list path applies is

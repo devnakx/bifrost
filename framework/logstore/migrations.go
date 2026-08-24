@@ -294,6 +294,7 @@ var logstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"logs_add_cost_breakdown_columns"}, run: migrationAddCostBreakdownColumns},
 	{IDs: []string{"logs_recreate_matviews_with_cost_breakdown"}, run: migrationRecreateMatViewsWithCostBreakdown},
 	{IDs: []string{"logs_add_overhead_breakdown_column"}, run: migrationAddOverheadBreakdownColumn},
+	{IDs: []string{"logs_add_safe_jsonb_preview_function"}, run: migrationAddSafeJsonbPreviewFunction},
 }
 
 // areThereAnyPendingMigrations returns true if there are any pending migrations to be applied.
@@ -3881,6 +3882,77 @@ $$;`
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error while adding bifrost_safe_jsonb function: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddSafeJsonbPreviewFunction installs a PL/pgSQL pure helper that the
+// /api/logs list query uses to bound the selected input-preview message on the
+// Postgres branch, mirroring the SQLite branch's layering in listSelectColumns:
+// it picks the last user/assistant message-type entry (falling back to the
+// absolute last element) and replaces it with a role-preserving minimal
+// placeholder when its serialized size exceeds cap_chars.
+//
+// bifrost_safe_jsonb cannot host this logic: it RETURNS text and its success
+// path only emits the last element, so the full history needed for the layered
+// selection would be lost before the choice is made.
+//
+// Postgres-only; SQLite layers the same semantics inline via json_each.
+func migrationAddSafeJsonbPreviewFunction(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "logs_add_safe_jsonb_preview_function"
+	logger.Info("[logstore] starting migration %s", migrationName)
+	defer logger.Info("[logstore] finished migration %s", migrationName)
+	opts := *migrator.DefaultOptions
+	opts.UseTransaction = true
+	m := migrator.New(db, &opts, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			if db.Dialector.Name() != "postgres" {
+				return nil
+			}
+			tx = tx.WithContext(ctx)
+			// 占位文本由 Go 常量拼接注入，保证与 oversizedInputPreviewPlaceholder 逐字一致
+			stmt := `CREATE OR REPLACE FUNCTION bifrost_safe_jsonb_preview(t text, cap_chars int) RETURNS text AS $$
+DECLARE j jsonb; e jsonb; i int; n int;
+BEGIN
+  IF t IS NULL OR t = '' OR t = '[]' OR left(btrim(t), 1) <> '[' THEN RETURN t; END IF;
+  BEGIN j := t::jsonb; EXCEPTION WHEN OTHERS THEN RETURN t; END;
+  IF jsonb_typeof(j) IS DISTINCT FROM 'array' OR jsonb_array_length(j) = 0 THEN RETURN t; END IF;
+  n := jsonb_array_length(j);
+  FOR i IN REVERSE n..1 LOOP
+    e := j -> (i - 1);
+    IF coalesce(e ->> 'type', 'message') = 'message'
+       AND e ->> 'role' IN ('user', 'assistant') THEN
+      IF octet_length(e::text) <= cap_chars THEN
+        RETURN jsonb_build_array(e)::text;
+      END IF;
+      RETURN jsonb_build_array(
+        jsonb_build_object('type', 'message', 'role', e -> 'role',
+                           'content', '` + oversizedInputPreviewPlaceholder + `'))::text;
+    END IF;
+  END LOOP;
+  -- 无 user/assistant 条目：对末条任意元素做同样处理
+  e := j -> (n - 1);
+  IF octet_length(e::text) <= cap_chars THEN
+    RETURN jsonb_build_array(e)::text;
+  END IF;
+  RETURN jsonb_build_array(
+    jsonb_build_object('type', 'message', 'role', e -> 'role',
+                       'content', '` + oversizedInputPreviewPlaceholder + `'))::text;
+END;
+$$ LANGUAGE plpgsql;`
+			if err := tx.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("failed to create bifrost_safe_jsonb_preview: %w", err)
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			return tx.Exec("DROP FUNCTION IF EXISTS bifrost_safe_jsonb_preview(text, int)").Error
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while adding bifrost_safe_jsonb_preview function: %s", err.Error())
 	}
 	return nil
 }
