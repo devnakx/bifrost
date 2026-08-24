@@ -23,7 +23,6 @@ describe("getMessage", () => {
 		const log = {
 			object: "realtime.turn",
 			input_history: [],
-			responses_input_history: [],
 			output_message: {
 				role: "assistant",
 				content: [{ type: "text", text: "hello from the model" }],
@@ -32,7 +31,6 @@ describe("getMessage", () => {
 
 		expect(getMessage(log)).toBe("Assistant: hello from the model");
 	});
-
 	it("returns split realtime text when both user and assistant are present", () => {
 		const log = {
 			object: "realtime.turn",
@@ -98,22 +96,24 @@ describe("getMessage", () => {
 		expect(getMessage(log)).toBe('User: show me a pastel palette\nAssistant Tool Call: display_color_palette({"theme":"pastel"})');
 	});
 
-	it("returns current assistant output when last responses input is a tool output", () => {
+	it("returns content_summary when present even if last responses input is a tool output", () => {
 		const log = {
 			object: "response.stream",
+			content_summary: "已根据参考图生成",
 			responses_input_history: [
 				{ role: "user", content: "生成两张图像" },
 				{ type: "custom_tool_call_output", call_id: "call_1", output: "Script completed Wall time 53.3 seconds" },
 			],
-			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "已根据参考图生成" }] }],
+			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被 content_summary 覆盖" }] }],
 		} as unknown as LogEntry;
 
 		expect(getMessage(log)).toBe("已根据参考图生成");
 	});
 
-	it("falls back to last human input message when agent turn has no assistant text output", () => {
+	it("falls back to content_summary when agent turn has no assistant text output", () => {
 		const log = {
 			object: "response.stream",
+			content_summary: "补全这个女角色的全身三视图",
 			responses_input_history: [
 				{ role: "user", content: "补全这个女角色的全身三视图" },
 				{ type: "function_call_output", call_id: "call_1", output: "No content" },
@@ -125,15 +125,17 @@ describe("getMessage", () => {
 	});
 
 	it("prepends reasoning snippet when same last input but different reasoning", () => {
-		// 复现生产场景：两行末条 user/assistant 相同、reasoning 不同
+		// 复现生产场景：两行末条 user/assistant 相同、reasoning 不同，content_summary 缺席时走 reasoning 分支
 		const makeLog = (reasoningText: string) =>
 			({
-				object: "response.stream",
-				responses_input_history: [{ type: "message", role: "assistant", content: "我将按同一材质生成三视图" }],
-				responses_output: [
-					{ type: "reasoning", summary: [{ type: "summary_text", text: reasoningText }] },
-					{ type: "custom_tool_call", name: "exec", call_id: "c1" },
-				],
+				object: "chat.completion",
+				input_history: [{ role: "user", content: "我将按同一材质生成三视图" }],
+				output_message: {
+					role: "assistant",
+					content: "",
+					reasoning: reasoningText,
+					tool_calls: [{ function: { name: "exec", arguments: "{}" } }],
+				},
 			}) as unknown as LogEntry;
 
 		const first = getMessage(makeLog("**Processing image reference**"));
@@ -144,44 +146,30 @@ describe("getMessage", () => {
 		expect(first).not.toBe(second);
 	});
 
-	it("ignores encrypted-only reasoning and falls back to last input", () => {
+	it("ignores empty reasoning and falls back to last input", () => {
 		const log = {
-			object: "response.stream",
-			responses_input_history: [{ type: "message", role: "user", content: "补全三视图" }],
-			responses_output: [
-				{ type: "reasoning", encrypted_content: "gAAAAABqiowC" },
-				{ type: "custom_tool_call", name: "exec", call_id: "c1" },
-			],
+			object: "chat.completion",
+			input_history: [{ role: "user", content: "补全三视图" }],
+			output_message: {
+				role: "assistant",
+				content: "",
+				tool_calls: [{ function: { name: "exec", arguments: "{}" } }],
+			},
 		} as unknown as LogEntry;
 
 		expect(getMessage(log)).toBe("补全三视图");
 	});
 
-	it("prepends chat reasoning when output has no text", () => {
-		const log = {
-			object: "chat.completion",
-			input_history: [{ role: "user", content: "what is the weather?" }],
-			output_message: {
-				role: "assistant",
-				content: "",
-				tool_calls: [{ function: { name: "get_weather", arguments: "{}" } }],
-				reasoning: "Need to call weather API",
-			},
-		} as unknown as LogEntry;
-
-		expect(getMessage(log)).toBe("Reasoning: Need to call weather API\nwhat is the weather?");
-	});
-
-	it("returns final assistant output for responses requests", () => {
+	it("returns content_summary for responses requests", () => {
 		const log = {
 			object: "response.stream",
+			content_summary: "hi",
 			responses_input_history: [{ role: "user", content: "hello" }],
-			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
+			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被 content_summary 覆盖" }] }],
 		} as unknown as LogEntry;
 
 		expect(getMessage(log)).toBe("hi");
 	});
-
 	it("returns current assistant output when last chat input is a tool message", () => {
 		const log = {
 			object: "chat.completion",

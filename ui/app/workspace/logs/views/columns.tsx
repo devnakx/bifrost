@@ -14,14 +14,7 @@ import {
 	Status,
 	StatusBarColors,
 } from "@/lib/constants/logs";
-import {
-	ChatMessage,
-	ChatMessageContent,
-	DisplayLogEntry,
-	LogEntry,
-	ResponsesMessage,
-	ResponsesMessageContentBlock,
-} from "@/lib/types/logs";
+import { ChatMessage, ChatMessageContent, DisplayLogEntry, LogEntry } from "@/lib/types/logs";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber } from "@/lib/utils/numbers";
 import { ColumnDef } from "@tanstack/react-table";
@@ -97,67 +90,10 @@ function getMessageFromContent(content?: ChatMessageContent): string {
 	return lastTextContentBlock;
 }
 
-// 判定 Responses API 条目是否为工具消息（各类 call 及其输出）
-// 分类口径与 logDetailView 的 getResponsesRole 保持一致
-function isResponsesToolMessage(msg?: ResponsesMessage): boolean {
-	const type = msg?.type;
-	if (!type) return false;
-	return (
-		type.endsWith("_call") ||
-		type.endsWith("_call_output") ||
-		type === "tool_search_output" ||
-		type === "additional_tools" ||
-		type === "mcp_list_tools" ||
-		type === "mcp_approval_request" ||
-		type === "mcp_approval_responses"
-	);
-}
-
-// 提取 Responses API 条目文本：优先 content，其次回退工具输出字段
-function getResponsesMessageText(msg?: ResponsesMessage): string {
-	if (!msg) return "";
-	const content = msg.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	let lastTextContentBlock = "";
-	for (const block of (content ?? []) as ResponsesMessageContentBlock[]) {
-		if (block.text && block.text !== "") {
-			lastTextContentBlock = block.text;
-		}
-	}
-	if (!lastTextContentBlock && msg.output) {
-		// output 字段可能是字符串、内容块数组或计算机截图对象
-		if (typeof msg.output === "string") {
-			return msg.output;
-		}
-		if (Array.isArray(msg.output)) {
-			return msg.output.map((block) => block.text).join("\n");
-		}
-		if (msg.output.type === "computer_screenshot") {
-			return msg.output.image_url ?? "";
-		}
-	}
-	return lastTextContentBlock;
-}
-
 // Chat：本次请求的 assistant 文本输出
 function getChatOutputText(log?: LogEntry): string {
 	if (!log?.output_message) return "";
 	return getMessageFromContent(log.output_message.content);
-}
-
-// Responses：本次请求输出里最后一条 assistant 消息的文本
-function getResponsesOutputText(log?: LogEntry): string {
-	const output = log?.responses_output;
-	if (!output || output.length === 0) return "";
-	for (let i = output.length - 1; i >= 0; i--) {
-		const msg = output[i];
-		if ((msg?.type ?? "message") !== "message" || isResponsesToolMessage(msg)) continue;
-		const text = getResponsesMessageText(msg);
-		if (text) return text;
-	}
-	return "";
 }
 
 // Chat：倒序找输入历史里最后一条 user/assistant 消息文本
@@ -168,20 +104,6 @@ function getLastHumanChatInputText(log?: LogEntry): string {
 		const msg = history[i];
 		if (msg?.role !== "user" && msg?.role !== "assistant") continue;
 		const text = getMessageFromContent(msg.content);
-		if (text) return text;
-	}
-	return "";
-}
-
-// Responses：倒序找输入历史里最后一条 user/assistant 消息文本
-function getLastHumanResponsesInputText(log?: LogEntry): string {
-	const history = log?.responses_input_history;
-	if (!history) return "";
-	for (let i = history.length - 1; i >= 0; i--) {
-		const msg = history[i];
-		if (isResponsesToolMessage(msg) || msg?.type === "reasoning") continue;
-		if (msg?.role !== "user" && msg?.role !== "assistant") continue;
-		const text = getResponsesMessageText(msg);
 		if (text) return text;
 	}
 	return "";
@@ -229,61 +151,6 @@ function getChatReasoningText(log?: LogEntry): string {
 	return "";
 }
 
-// Responses：提取 reasoning 条目的可读文本，优先 summary 再回退 content 里的 reasoning_text
-// 跳过 encrypted_content（不可读，无区分价值）
-function getResponsesReasoningMessageText(msg?: ResponsesMessage): string {
-	if (!msg) return "";
-	const summary = (msg.summary ?? [])
-		.map((s) => s?.text ?? "")
-		.filter(Boolean)
-		.join("\n")
-		.trim();
-	if (summary) return summary;
-	if (Array.isArray(msg.content)) {
-		const text = (msg.content as ResponsesMessageContentBlock[])
-			.map((b) => b?.text ?? "")
-			.filter(Boolean)
-			.join("\n")
-			.trim();
-		if (text) return text;
-	}
-	return "";
-}
-
-// Responses：当前轮 reasoning，优先输出里最后一条 reasoning 条目
-// 再回退输入历史里最后一条 user/assistant 之后的 reasoning
-function getResponsesReasoningText(log?: LogEntry): string {
-	const output = log?.responses_output;
-	if (output) {
-		for (let i = output.length - 1; i >= 0; i--) {
-			const msg = output[i];
-			if (msg?.type !== "reasoning") continue;
-			const text = getResponsesReasoningMessageText(msg);
-			if (text) return text;
-		}
-	}
-	const history = log?.responses_input_history;
-	if (history) {
-		// 定位最后一条 user/assistant 消息，只取其后的 reasoning（避免取到上一轮的）
-		let lastHumanIdx = -1;
-		for (let i = history.length - 1; i >= 0; i--) {
-			const msg = history[i];
-			if (isResponsesToolMessage(msg) || msg?.type === "reasoning") continue;
-			if (msg?.role === "user" || msg?.role === "assistant") {
-				lastHumanIdx = i;
-				break;
-			}
-		}
-		for (let i = history.length - 1; i > lastHumanIdx; i--) {
-			const msg = history[i];
-			if (msg?.type !== "reasoning") continue;
-			const text = getResponsesReasoningMessageText(msg);
-			if (text) return text;
-		}
-	}
-	return "";
-}
-
 export function getRealtimeTurnMessages(log?: LogEntry): {
 	tool?: string;
 	user?: string;
@@ -325,18 +192,20 @@ export function getMessage(log?: LogEntry) {
 		}
 		return "";
 	}
-	// 对话类请求优先展示本次请求的最终 assistant 输出（列表行的输出已被后端裁剪为预览）
+	// 列表瘦身后优先 content_summary，列表行不再依赖 responses_* 大字段
+	const summary = log?.content_summary?.trim();
+	if (summary) {
+		return summary;
+	}
+	// Chat 列表预览：output_message 仍在 postgres 投影中保留，缺 summary 时回退
 	const hasChatInput = !!log?.input_history && log.input_history.length > 0;
-	const hasResponsesInput = !!log?.responses_input_history && log.responses_input_history.length > 0;
-	if (hasChatInput || hasResponsesInput) {
-		const outputText = hasChatInput ? getChatOutputText(log) : getResponsesOutputText(log);
+	if (hasChatInput) {
+		const outputText = getChatOutputText(log);
 		if (outputText) {
 			return outputText;
 		}
-		// 无 assistant 正文（如纯 tool call 响应）时，把当前轮 reasoning 片段拼到
-		// 最后一条用户/助手消息前，避免多行末条相同但 reasoning 不同时预览完全一致
-		const reasoningText = hasChatInput ? getChatReasoningText(log) : getResponsesReasoningText(log);
-		const fallbackText = hasChatInput ? getLastHumanChatInputText(log) : getLastHumanResponsesInputText(log);
+		const reasoningText = getChatReasoningText(log);
+		const fallbackText = getLastHumanChatInputText(log);
 		if (reasoningText) {
 			const snippet = truncatePreview(reasoningText);
 			if (fallbackText) {
@@ -344,7 +213,6 @@ export function getMessage(log?: LogEntry) {
 			}
 			return `Reasoning: ${snippet}`;
 		}
-		// 仍为空则不 return，落到下方 content_summary 兜底
 		if (fallbackText) {
 			return fallbackText;
 		}
@@ -358,7 +226,6 @@ export function getMessage(log?: LogEntry) {
 	} else if (log?.image_generation_input?.prompt) {
 		return log.image_generation_input.prompt;
 	} else if (log?.image_edit_input?.prompt) {
-		// Image Edit 与 Image Generation 一致展示输入 prompt，列表行的图片已被后端剥离
 		return log.image_edit_input.prompt;
 	}
 	const obj = log?.object as string | undefined;
