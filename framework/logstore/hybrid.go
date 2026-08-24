@@ -425,6 +425,62 @@ func (h *HybridLogStore) FindByID(ctx context.Context, id string) (*Log, error) 
 	return log, nil
 }
 
+// detailMetaPayloadFields 为详情元数据保留的 payload 字段集合（排除四重字段）
+// 复用于 RDB Omit 与 hybrid hydrateLog 的 requestedFields，避免拉回全量 blob
+var detailMetaPayloadFields = func() []string {
+	excluded := map[string]struct{}{
+		"responses_input_history": {},
+		"responses_output":        {},
+		"raw_request":             {},
+		"raw_response":            {},
+	}
+	out := make([]string, 0, len(payloadFields)-len(excluded))
+	for _, f := range payloadFields {
+		if _, skip := excluded[f]; !skip {
+			out = append(out, f)
+		}
+	}
+	return out
+}()
+
+// FindByIDWithFields 按显式字段投影查询并按需水合
+func (h *HybridLogStore) FindByIDWithFields(ctx context.Context, id string, fields ...string) (*Log, error) {
+	needsHydration := len(fields) == 0 || fieldsNeedHydration(fields)
+	if needsHydration && len(fields) > 0 {
+		fields = ensureHydrationFields(fields)
+	}
+	log, err := h.inner.FindByIDWithFields(ctx, id, fields...)
+	if err != nil {
+		return nil, err
+	}
+	if needsHydration {
+		h.hydrateLog(ctx, log, fields...)
+	}
+	return log, nil
+}
+
+// FindByIDDetail 为元数据瘦身路径：通过 requestedFields 显式传入保留字段清单
+func (h *HybridLogStore) FindByIDDetail(ctx context.Context, id string) (*Log, error) {
+	// 优先尝试内层的 Detail 快路径（RDB 的 Omit 实现），避免 Select(*) 读出重字段
+	if detailStore, ok := h.inner.(interface {
+		FindByIDDetail(context.Context, string) (*Log, error)
+	}); ok {
+		log, err := detailStore.FindByIDDetail(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		h.hydrateLog(ctx, log, detailMetaPayloadFields...)
+		return log, nil
+	}
+	// 回退：走全量 FindByID 再通过 requestedFields 裁剪（仍避免返回重字段）
+	log, err := h.inner.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	h.hydrateLog(ctx, log, detailMetaPayloadFields...)
+	return log, nil
+}
+
 // hydrateLog fetches the offloaded payload from object storage and merges it
 // back into the Log struct. It is a no-op when HasObject is false.
 //

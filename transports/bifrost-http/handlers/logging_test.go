@@ -581,6 +581,10 @@ type dashboardLogManager struct {
 func (m *dashboardLogManager) GetLog(ctx context.Context, id string) (*logstore.Log, error) {
 	return nil, nil
 }
+
+func (m *dashboardLogManager) GetLogDetail(ctx context.Context, id string) (*logstore.Log, error) {
+	return m.GetLog(ctx, id)
+}
 func (m *dashboardLogManager) Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error) {
 	return nil, nil
 }

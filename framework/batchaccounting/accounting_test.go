@@ -49,6 +49,14 @@ func (s *fakeAccountingStore) FindByID(ctx context.Context, id string) (*logstor
 	return &copied, nil
 }
 
+func (s *fakeAccountingStore) FindByIDWithFields(ctx context.Context, id string, fields ...string) (*logstore.Log, error) {
+	return s.FindByID(ctx, id)
+}
+
+func (s *fakeAccountingStore) FindByIDDetail(ctx context.Context, id string) (*logstore.Log, error) {
+	return s.FindByID(ctx, id)
+}
+
 func (s *fakeAccountingStore) UpsertBatchJob(ctx context.Context, job *cstables.TableBatchJob) error {
 	if job.ID == "" {
 		job.ID = cstables.BatchJobID(job.Provider, job.BatchID)

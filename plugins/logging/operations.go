@@ -1135,6 +1135,27 @@ func (p *LoggerPlugin) GetLog(ctx context.Context, id string) (*logstore.Log, er
 	return p.store.FindByID(ctx, id)
 }
 
+// GetLogDetail retrieves slimmed log metadata for GET /api/logs/<id>（排除四重字段）
+func (p *LoggerPlugin) GetLogDetail(ctx context.Context, id string) (*logstore.Log, error) {
+	if detailStore, ok := p.store.(interface {
+		FindByIDDetail(context.Context, string) (*logstore.Log, error)
+	}); ok {
+		return detailStore.FindByIDDetail(ctx, id)
+	}
+	// 回退：全量取回后在 Go 侧裁剪（保 API 瘦身语义，DB 投影优化缺失时仍正确）
+	log, err := p.store.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	log.ResponsesInputHistory = ""
+	log.ResponsesInputHistoryParsed = nil
+	log.ResponsesOutput = ""
+	log.ResponsesOutputParsed = nil
+	log.RawRequest = ""
+	log.RawResponse = ""
+	return log, nil
+}
+
 // GetMCPToolLog retrieves a single MCP tool log entry by ID.
 func (p *LoggerPlugin) GetMCPToolLog(ctx context.Context, id string) (*logstore.MCPToolLog, error) {
 	return p.store.FindMCPToolLog(ctx, id)

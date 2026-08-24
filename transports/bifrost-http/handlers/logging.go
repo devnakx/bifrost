@@ -376,6 +376,12 @@ func (h *LoggingHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 	r.POST("/api/logs/user-agent-mappings", lib.ChainMiddlewares(h.createUserAgentMapping, middlewares...))
 	r.PUT("/api/logs/user-agent-mappings/{id}", lib.ChainMiddlewares(h.updateUserAgentMapping, middlewares...))
 	r.DELETE("/api/logs/user-agent-mappings/{id}", lib.ChainMiddlewares(h.deleteUserAgentMapping, middlewares...))
+	// 详情拆分：messages / raw 必须注册在通用 {id} 之前，避免通配吃掉子路径
+	r.GET("/api/logs/{id}/messages", lib.ChainMiddlewares(h.getLogMessages, middlewares...))
+	r.GET("/api/logs/{id}/raw", lib.ChainMiddlewares(h.getLogRaw, middlewares...))
+	r.GET("/api/logs/{id}", lib.ChainMiddlewares(h.getLogByID, middlewares...))
+	r.GET("/api/logs/{id}/messages", lib.ChainMiddlewares(h.getLogMessages, middlewares...))
+	r.GET("/api/logs/{id}/raw", lib.ChainMiddlewares(h.getLogRaw, middlewares...))
 	r.GET("/api/logs/{id}", lib.ChainMiddlewares(h.getLogByID, middlewares...))
 	r.GET("/api/logs/stats", lib.ChainMiddlewares(h.getLogsStats, middlewares...))
 	r.GET("/api/logs/histogram", lib.ChainMiddlewares(h.getLogsHistogram, middlewares...))
@@ -821,7 +827,7 @@ func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
 	SendJSON(ctx, result)
 }
 
-// getLogByID handles GET /api/logs/{id} - Get a single log entry by ID including raw_request and raw_response
+// getLogByID handles GET /api/logs/{id} - Get a single log entry by ID（元数据瘦身：默认不返回四重字段）
 func (h *LoggingHandler) getLogByID(ctx *fasthttp.RequestCtx) {
 	id, ok := ctx.UserValue("id").(string)
 	if !ok || id == "" {
@@ -829,7 +835,23 @@ func (h *LoggingHandler) getLogByID(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	log, err := h.logManager.GetLog(ctx, id)
+	var log *logstore.Log
+	var err error
+	if detailMgr, ok := h.logManager.(interface {
+		GetLogDetail(context.Context, string) (*logstore.Log, error)
+	}); ok {
+		log, err = detailMgr.GetLogDetail(ctx, id)
+	} else {
+		log, err = h.logManager.GetLog(ctx, id)
+		if err == nil && log != nil {
+			log.ResponsesInputHistory = ""
+			log.ResponsesInputHistoryParsed = nil
+			log.ResponsesOutput = ""
+			log.ResponsesOutputParsed = nil
+			log.RawRequest = ""
+			log.RawResponse = ""
+		}
+	}
 	if err != nil {
 		if errors.Is(err, logstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "log not found")
@@ -863,7 +885,99 @@ func (h *LoggingHandler) getLogByID(ctx *fasthttp.RequestCtx) {
 		log.RoutingRule = findRedactedRoutingRule(redactedRoutingRules, *log.RoutingRuleID, *log.RoutingRuleName)
 	}
 
+	// 确保四重字段不出现在元数据响应中（tables.go RawRequest/RawResponse 已改为 omitempty，Responses*Parsed 本就 omitempty，置空后单次 SendJSON 即可）
+	log.ResponsesInputHistory = ""
+	log.ResponsesInputHistoryParsed = nil
+	log.ResponsesOutput = ""
+	log.ResponsesOutputParsed = nil
+	log.RawRequest = ""
+	log.RawResponse = ""
+
 	SendJSON(ctx, log)
+}
+
+// getLogMessages handles GET /api/logs/{id}/messages?offset=&limit= - paginated messages
+func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
+	id, ok := ctx.UserValue("id").(string)
+	if !ok || id == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "log id is required")
+		return
+	}
+	offset := 0
+	if v := string(ctx.QueryArgs().Peek("offset")); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil || i < 0 {
+			SendError(ctx, fasthttp.StatusBadRequest, "invalid offset")
+			return
+		}
+		offset = i
+	}
+	limit := 20
+	if v := string(ctx.QueryArgs().Peek("limit")); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil || i <= 0 {
+			SendError(ctx, fasthttp.StatusBadRequest, "invalid limit")
+			return
+		}
+		if i > 100 {
+			i = 100
+		}
+		limit = i
+	}
+	log, err := h.logManager.GetLog(ctx, id)
+	if err != nil {
+		if errors.Is(err, logstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, "log not found")
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get log: %v", err))
+		return
+	}
+	messages, total, err := logstore.SliceLogMessages(log, offset, limit)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	hasMore := offset+len(messages) < total
+	SendJSON(ctx, map[string]interface{}{
+		"messages": messages,
+		"offset":   offset,
+		"limit":    limit,
+		"total":    total,
+		"has_more": hasMore,
+	})
+}
+
+// getLogRaw handles GET /api/logs/{id}/raw - returns raw_request/raw_response + redaction_mapping
+func (h *LoggingHandler) getLogRaw(ctx *fasthttp.RequestCtx) {
+	id, ok := ctx.UserValue("id").(string)
+	if !ok || id == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "log id is required")
+		return
+	}
+	log, err := h.logManager.GetLog(ctx, id)
+	if err != nil {
+		if errors.Is(err, logstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, "log not found")
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get log: %v", err))
+		return
+	}
+	var mapping *schemas.RedactionMapsByPhase
+	if h.logRedactionMappingResolver != nil && log.RedactionMapping != "" {
+		m, err := h.logRedactionMappingResolver.ResolveLogRedactionMapping(ctx, log)
+		if err != nil {
+			logger.Error("failed to resolve redaction mapping for log %s: %v", id, err)
+		} else if m != nil && m.HasReplacements() {
+			mapping = m
+		}
+	}
+	SendJSON(ctx, map[string]interface{}{
+		"raw_request":       log.RawRequest,
+		"raw_response":      log.RawResponse,
+		"redaction_mapping": mapping,
+	})
 }
 
 // getLogsStats handles GET /api/logs/stats - Get statistics for logs with filtering

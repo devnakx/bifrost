@@ -25,6 +25,8 @@ type KeyPair struct {
 type LogManager interface {
 	// GetLog retrieves a single log entry by ID (includes all fields, including raw_request/raw_response)
 	GetLog(ctx context.Context, id string) (*logstore.Log, error)
+	// GetLogDetail retrieves slimmed log metadata for GET /api/logs/<id> (excludes heavy fields)
+	GetLogDetail(ctx context.Context, id string) (*logstore.Log, error)
 
 	// Search searches for log entries based on filters and pagination
 	Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error)
@@ -195,6 +197,10 @@ type PluginLogManager struct {
 
 func (p *PluginLogManager) GetLog(ctx context.Context, id string) (*logstore.Log, error) {
 	return p.plugin.GetLog(ctx, id)
+}
+
+func (p *PluginLogManager) GetLogDetail(ctx context.Context, id string) (*logstore.Log, error) {
+	return p.plugin.GetLogDetail(ctx, id)
 }
 
 func (p *PluginLogManager) Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error) {

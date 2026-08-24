@@ -4097,6 +4097,35 @@ func (s *RDBLogStore) FindByID(ctx context.Context, id string) (*Log, error) {
 	return &log, nil
 }
 
+// FindByIDWithFields 按显式字段投影查询，支持详情元数据的 SELECT 裁剪
+func (s *RDBLogStore) FindByIDWithFields(ctx context.Context, id string, fields ...string) (*Log, error) {
+	var log Log
+	db := s.ScopedDB(ctx)
+	if len(fields) > 0 {
+		db = db.Select(fields)
+	}
+	if err := db.Where("id = ?", id).First(&log).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &log, nil
+}
+
+// FindByIDDetail 为 GET /api/logs/<id> 元数据瘦身路径：默认不返回四重字段
+// 通过 Omit 实现四字段 SELECT 投影排除，保留其余全部列
+func (s *RDBLogStore) FindByIDDetail(ctx context.Context, id string) (*Log, error) {
+	var log Log
+	if err := s.ScopedDB(ctx).Omit("ResponsesInputHistory", "ResponsesOutput", "RawRequest", "RawResponse").Where("id = ?", id).First(&log).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &log, nil
+}
+
 // IsLogEntryPresent checks if a log entry is present in the database.
 // Here we dont load entire log entry in memory - just check if it exists.
 func (s *RDBLogStore) IsLogEntryPresent(ctx context.Context, id string) (bool, error) {
