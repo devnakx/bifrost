@@ -1248,6 +1248,9 @@ func normalizeAggregateTimestamp(value any) string {
 //
 // Realtime turn rows are kept intact because the logs table renders them as a
 // combined Tool/User/Assistant summary and needs the full turn context.
+//
+// 选中的输入预览消息超过 maxListInputPreviewChars 字符时以保留原 role 的
+// 最小合法占位消息替代，详情接口 FindByID 不受影响仍返回全量
 func (s *RDBLogStore) listSelectColumns() string {
 	baseCols := strings.Join([]string{
 		"id", "parent_request_id", "timestamp", "object_type", "provider", "model", "alias",
@@ -1304,32 +1307,53 @@ func (s *RDBLogStore) listSelectColumns() string {
 		responsesInputExpr = `responses_input_history AS responses_input_history`
 	default: // sqlite
 		// 预览优先取最后一条 user/assistant 条目：末条是工具输出且本次请求无
-		// assistant 文本时，UI 仍能回退到人类消息；找不到人类条目时回退末条
-		inputHistoryExpr = `CASE
-			WHEN object_type = 'realtime.turn' THEN input_history
-			WHEN input_history IS NOT NULL AND input_history != '' AND input_history != '[]'
-			     AND json_valid(input_history) = 1
-			     AND json_type(input_history) = 'array'
-			     AND json_array_length(input_history) > 0
-			THEN coalesce(
-				(SELECT json_array(value) FROM json_each(input_history)
-				 WHERE json_extract(value, '$.role') IN ('user', 'assistant')
-				 ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
-				json_array(json_extract(input_history, '$[' || (json_array_length(input_history) - 1) || ']')))
-			ELSE input_history END AS input_history`
-		responsesInputExpr = `CASE
-			WHEN object_type = 'realtime.turn' THEN responses_input_history
-			WHEN responses_input_history IS NOT NULL AND responses_input_history != '' AND responses_input_history != '[]'
-			     AND json_valid(responses_input_history) = 1
-			     AND json_type(responses_input_history) = 'array'
-			     AND json_array_length(responses_input_history) > 0
-			THEN coalesce(
-				(SELECT json_array(value) FROM json_each(responses_input_history)
-				 WHERE ifnull(json_extract(value, '$.type'), 'message') = 'message'
-				   AND json_extract(value, '$.role') IN ('user', 'assistant')
-				 ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
-				json_array(json_extract(responses_input_history, '$[' || (json_array_length(responses_input_history) - 1) || ']')))
-			ELSE responses_input_history END AS responses_input_history`
+		// assistant 文本时，UI 仍能回退到人类消息；找不到人类条目时回退末条；
+		// 被选中消息超 maxListInputPreviewChars 字符时以保留原 role 的占位替代，
+		// 占位文本不含引号类字符可安全经 Sprintf 注入 SQL 字面量
+		inputHistoryExpr = fmt.Sprintf(`CASE
+WHEN object_type = 'realtime.turn' THEN input_history
+WHEN input_history IS NOT NULL AND input_history != '' AND input_history != '[]'
+     AND json_valid(input_history) = 1
+     AND json_type(input_history) = 'array'
+     AND json_array_length(input_history) > 0
+THEN coalesce(
+    (SELECT CASE WHEN length(value) <= %d THEN json_array(value)
+                 ELSE json_array(json_object('role', json_extract(value, '$.role'),
+                                             'content', '%s')) END
+     FROM json_each(input_history)
+     WHERE json_extract(value, '$.role') IN ('user', 'assistant')
+     ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
+    (SELECT CASE WHEN length(value) <= %d THEN json_array(value)
+                 ELSE json_array(json_object('role', json_extract(value, '$.role'),
+                                             'content', '%s')) END
+     FROM json_each(input_history)
+     ORDER BY CAST(key AS INTEGER) DESC LIMIT 1))
+ELSE input_history END AS input_history`,
+			maxListInputPreviewChars, oversizedInputPreviewPlaceholder,
+			maxListInputPreviewChars, oversizedInputPreviewPlaceholder)
+		responsesInputExpr = fmt.Sprintf(`CASE
+WHEN object_type = 'realtime.turn' THEN responses_input_history
+WHEN responses_input_history IS NOT NULL AND responses_input_history != '' AND responses_input_history != '[]'
+     AND json_valid(responses_input_history) = 1
+     AND json_type(responses_input_history) = 'array'
+     AND json_array_length(responses_input_history) > 0
+THEN coalesce(
+    (SELECT CASE WHEN length(value) <= %d THEN json_array(value)
+                 ELSE json_array(json_object('type', 'message', 'role', json_extract(value, '$.role'),
+                                             'content', '%s')) END
+     FROM json_each(responses_input_history)
+     WHERE ifnull(json_extract(value, '$.type'), 'message') = 'message'
+       AND json_extract(value, '$.role') IN ('user', 'assistant')
+     ORDER BY CAST(key AS INTEGER) DESC LIMIT 1),
+    (SELECT CASE WHEN length(value) <= %d THEN json_array(value)
+                 ELSE json_array(json_object('type', 'message', 'role', json_extract(value, '$.role'),
+                                             'content', '%s')) END
+     FROM json_each(responses_input_history)
+     WHERE ifnull(json_extract(value, '$.type'), 'message') = 'message'
+     ORDER BY CAST(key AS INTEGER) DESC LIMIT 1))
+ELSE responses_input_history END AS responses_input_history`,
+			maxListInputPreviewChars, oversizedInputPreviewPlaceholder,
+			maxListInputPreviewChars, oversizedInputPreviewPlaceholder)
 	}
 
 	// 输出列全量读出，由 trimListOutputPreviews 在 Go 侧裁剪为助手预览

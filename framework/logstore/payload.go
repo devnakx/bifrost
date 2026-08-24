@@ -589,6 +589,13 @@ func extractResponsesMessageText(msg *schemas.ResponsesMessage) string {
 // maxListOutputPreviewRunes 限制列表行助手输出预览长度，防止长答案撑大 /api/logs 响应体
 const maxListOutputPreviewRunes = 512
 
+// maxListInputPreviewChars caps each selected input-history preview message in the list projection
+// 口径为 SQLite length() 的字符数；占位文本禁止包含单引号等引号类字符（经 Sprintf 注入 SQL 字面量）
+const maxListInputPreviewChars = 4096
+
+// oversizedInputPreviewPlaceholder replaces an over-cap selected message body
+const oversizedInputPreviewPlaceholder = "[preview omitted: message too large]"
+
 // trimListPayloadPreviews 将列表行的完整 payload 替换为轻量预览：输出仅保留
 // 最后一条 assistant 文本与 reasoning 摘要，Image Edit 输入仅保留 prompt
 // （剥离 base64 图片），供 UI 的 Message 列展示；realtime.turn 行保持完整
