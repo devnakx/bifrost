@@ -114,7 +114,6 @@ export function LogDetailSheet({
 
 	if (!log) return null;
 
-	// Show a loader only on the initial fetch, not during background polling refetches.
 	const displayLog: LogEntry = isFullDataReady && fullLog ? fullLog : log;
 	const resolvedSelectedPromptName = selectedPromptData?.prompt?.name ?? displayLog.selected_prompt_name ?? "";
 
@@ -125,57 +124,52 @@ export function LogDetailSheet({
 				<SheetDescription className="sr-only">
 					{isFullDataReady && displayLog ? `Details for log ${displayLog.id}` : "Log details"}
 				</SheetDescription>
-				{!isFullDataReady ? (
-					<div className="flex h-full items-center justify-center">
-						<Loader2 className="text-muted-foreground h-6 w-6 animate-spin" />
-					</div>
-				) : (
-					<ScrollArea viewportRef={viewportRef} className="flex min-h-0 flex-1 flex-col" viewportClassName="flex-1 [&>div]:!block [&>div]:!min-w-0">
-						<LogDetailView
-							log={displayLog}
-							resolvedSelectedPromptName={resolvedSelectedPromptName}
-							handleDelete={handleDelete}
-							canReveal={canReveal}
-							onClose={() => onOpenChange(false)}
-							onFilterByParentRequestId={onFilterByParentRequestId}
-							paginatedMessages={flatMessages}
-							hasMoreMessages={Boolean(hasNextPage)}
-							isFetchingMoreMessages={isFetchingNextPage}
-							sentinelRef={sentinelRef as React.RefObject<HTMLDivElement>}
-							onLoadMore={() => {
-								if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-							}}
-							headerAction={
-								<>
-									{displayLog.parent_request_id && onViewSession ? (
-										<Button
-											variant="outline"
-											size="sm"
-											data-testid="session-button-view"
-											onClick={() => onViewSession(displayLog.parent_request_id as string, displayLog.id)}
-										>
-											View Session
-										</Button>
-									) : null}
-									<SheetNavigationButtons
-										hasPrev={hasPrev}
-										hasNext={hasNext}
-										onNavigate={(dir) => onNavigate?.(dir)}
-										prevKeys={prevKeys}
-										nextKeys={nextKeys}
-										entityLabel="log"
-									/>
-								</>
-							}
-						/>
-						<div ref={sentinelRef} className="h-px w-full shrink-0" />
-						{isFetchingNextPage ? (
-							<div className="flex justify-center py-3">
-								<Loader2 className="text-muted-foreground h-4 w-4 animate-spin" />
-							</div>
-						) : null}
-					</ScrollArea>
-				)}
+				<ScrollArea viewportRef={viewportRef} className="flex min-h-0 flex-1 flex-col" viewportClassName="flex-1 [&>div]:!block [&>div]:!min-w-0">
+					<LogDetailView
+						log={displayLog}
+						resolvedSelectedPromptName={resolvedSelectedPromptName}
+						isMetaDataLoading={!isFullDataReady}
+						handleDelete={handleDelete}
+						canReveal={canReveal}
+						onClose={() => onOpenChange(false)}
+						onFilterByParentRequestId={onFilterByParentRequestId}
+						paginatedMessages={flatMessages}
+						hasMoreMessages={Boolean(hasNextPage)}
+						isFetchingMoreMessages={isFetchingNextPage}
+						sentinelRef={sentinelRef as React.RefObject<HTMLDivElement>}
+						onLoadMore={() => {
+							if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+						}}
+						headerAction={
+							<>
+								{displayLog.parent_request_id && onViewSession ? (
+									<Button
+										variant="outline"
+										size="sm"
+										data-testid="session-button-view"
+										onClick={() => onViewSession(displayLog.parent_request_id as string, displayLog.id)}
+									>
+										View Session
+									</Button>
+								) : null}
+								<SheetNavigationButtons
+									hasPrev={hasPrev}
+									hasNext={hasNext}
+									onNavigate={(dir) => onNavigate?.(dir)}
+									prevKeys={prevKeys}
+									nextKeys={nextKeys}
+									entityLabel="log"
+								/>
+							</>
+						}
+					/>
+					<div ref={sentinelRef} className="h-px w-full shrink-0" />
+					{isFetchingNextPage ? (
+						<div className="flex justify-center py-3">
+							<Loader2 className="text-muted-foreground h-4 w-4 animate-spin" />
+						</div>
+					) : null}
+				</ScrollArea>
 			</SheetContent>
 		</Sheet>
 	);

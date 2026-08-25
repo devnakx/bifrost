@@ -14,6 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/ui/codeEditor";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	DropdownMenu,
 	DropdownMenuCheckboxItem,
@@ -841,7 +842,9 @@ function MessageRow({ role, meta, children, last = false }: { role: MessageRole;
 interface LogDetailViewProps {
 	log: LogEntry | null;
 	resolvedSelectedPromptName?: string; // Current prompt name from prompt-repo when `selected_prompt_id` is set; falls back to stored log name
-	loading?: boolean;
+	loading?: boolean; // 已废弃的全屏门控，仅为向后兼容保留；新代码请用 isMetaDataLoading
+	// isMetaDataLoading 与 loading 分工：loading 控制旧版整屏 spinner（现已移除），isMetaDataLoading 仅驱动差异字段区块的骨架屏，避免双 loading 反模式
+	isMetaDataLoading?: boolean;
 	handleDelete?: (log: LogEntry) => void;
 	canReveal?: boolean;
 	onClose?: () => void;
@@ -858,6 +861,7 @@ export function LogDetailView({
 	log,
 	resolvedSelectedPromptName,
 	loading = false,
+	isMetaDataLoading,
 	handleDelete,
 	canReveal = false,
 	onClose,
@@ -869,6 +873,8 @@ export function LogDetailView({
 	sentinelRef,
 	onLoadMore,
 }: LogDetailViewProps) {
+	// 字段级加载态：isMetaDataLoading 优先，缺省时回退至 loading 以兼容旧调用，避免双 loading 反模式
+	const isDetailMetaLoading = isMetaDataLoading ?? loading;
 	const { copy: copyBody } = useCopyToClipboard({
 		successMessage: "Request body copied to clipboard",
 		errorMessage: "Failed to copy request body",
@@ -1095,11 +1101,7 @@ export function LogDetailView({
 		return 0;
 	})();
 
-	return loading ? (
-		<div className="flex h-full items-center justify-center">
-			<Loader2 className="text-muted-foreground h-6 w-6 animate-spin" />
-		</div>
-	) : (
+	return (
 		<>
 			{/* Breadcrumb header with actions */}
 			<div className="flex items-center justify-between gap-3">
@@ -1476,8 +1478,13 @@ export function LogDetailView({
 								value={log.overhead_latency == null || isNaN(log.overhead_latency) ? "N/A" : <div>{log.overhead_latency.toFixed(2)}ms</div>}
 							/>
 						</div>
-						{log.overhead_breakdown && log.overhead_breakdown.length > 0 ? (
-							<OverheadBreakdown buckets={log.overhead_breakdown} overheadMs={log.overhead_latency} />
+						{isDetailMetaLoading ? (
+							<div data-testid="logdetails-meta-skeleton" className="space-y-2">
+								<Skeleton className="h-4 w-32" />
+								<Skeleton className="h-12 w-full" />
+							</div>
+						) : log.overhead_breakdown?.length ? (
+							<OverheadBreakdown buckets={log.overhead_breakdown!} overheadMs={log.overhead_latency} />
 						) : null}
 					</div>
 					<DottedSeparator />
@@ -3169,33 +3176,40 @@ export function LogDetailView({
 						</CollapsibleBox>
 					)}
 
-					{(log.error_details?.error.message || log.error_details?.error.error != null) && (
+					{isDetailMetaLoading ? (
+						<div data-testid="logdetails-error-skeleton" className="space-y-2 rounded-sm border p-4">
+							<Skeleton className="h-4 w-24" />
+							<Skeleton className="h-12 w-full" />
+						</div>
+					) : (log.error_details?.error?.message || log.error_details?.error?.error != null) ? (
 						<div className="rounded-sm border border-red-200 bg-red-50/70 p-5 dark:border-red-900 dark:bg-red-950/30">
 							<div className="flex items-center gap-2 text-red-700 dark:text-red-400">
 								<AlertCircle className="h-4 w-4 shrink-0" />
 								<span className="text-[12.5px] font-semibold">Error</span>
-								{log.error_details?.error.message ? <CopyInlineButton text={log.error_details.error.message} /> : null}
+								{log.error_details?.error?.message ? <CopyInlineButton text={log.error_details?.error?.message} /> : null}
 							</div>
-							{log.error_details?.error.message ? (
+							{log.error_details?.error?.message ? (
 								<div className="mt-2 text-[13px] leading-relaxed break-words whitespace-pre-wrap text-red-700 dark:text-red-400">
-									{log.error_details.error.message}
+									{log.error_details?.error?.message}
 								</div>
 							) : null}
-							{log.error_details?.error.error != null ? (
+							{log.error_details?.error?.error != null ? (
 								<details className="group mt-3 rounded-sm border border-red-200/70 bg-white/40 dark:border-red-900/70 dark:bg-red-950/40">
 									<summary className="flex cursor-pointer items-center justify-between px-3 py-2 text-[12px] text-red-700 hover:bg-red-50/80 dark:text-red-400 dark:hover:bg-red-950/60">
 										<span className="font-medium">Details</span>
 										<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
 									</summary>
 									<div className="custom-scrollbar max-h-[400px] overflow-y-auto border-t border-red-200/70 px-3 py-2 font-mono text-[11.5px] leading-[1.6] break-words whitespace-pre-wrap text-red-900 dark:border-red-900/70 dark:text-red-300">
-										{typeof log.error_details.error.error === "string"
-											? log.error_details.error.error
-											: JSON.stringify(log.error_details.error.error, null, 2)}
+										{typeof log.error_details?.error?.error === "string"
+											? log.error_details?.error?.error
+											: JSON.stringify(log.error_details?.error?.error, null, 2)}
 									</div>
 								</details>
 							) : null}
 						</div>
-					)}
+					) : log.status === "error" ? (
+						<div className="text-muted-foreground rounded-sm border border-dashed p-5 text-center text-sm">No error details available for this request.</div>
+					) : null}
 				</TabsContent>
 
 				<TabsContent value="tools" className="space-y-3">
@@ -3309,8 +3323,13 @@ export function LogDetailView({
 							</div>
 						</CollapsibleBox>
 					)}
-					{log.routing_engine_logs ? (
-						<RoutingDecisionLogs logs={log.routing_engine_logs} />
+					{isDetailMetaLoading ? (
+						<div data-testid="logdetails-routing-skeleton" className="space-y-2 rounded-sm border p-4">
+							<Skeleton className="h-4 w-28" />
+							<Skeleton className="h-16 w-full" />
+						</div>
+					) : log.routing_engine_logs ? (
+						<RoutingDecisionLogs logs={log.routing_engine_logs!} />
 					) : (
 						<div className="text-muted-foreground rounded-sm border border-dashed p-5 text-center text-sm">
 							No routing logs for this request.
@@ -3318,9 +3337,15 @@ export function LogDetailView({
 					)}
 				</TabsContent>
 
+
 				<TabsContent value="plugins" className="space-y-3">
-					{log.plugin_logs ? (
-						<PluginLogsView pluginLogs={log.plugin_logs} />
+					{isDetailMetaLoading ? (
+						<div data-testid="logdetails-plugin-skeleton" className="space-y-2 rounded-sm border p-4">
+							<Skeleton className="h-4 w-28" />
+							<Skeleton className="h-16 w-full" />
+						</div>
+					) : log.plugin_logs ? (
+						<PluginLogsView pluginLogs={log.plugin_logs!} />
 					) : (
 						<div className="text-muted-foreground rounded-sm border border-dashed p-5 text-center text-sm">
 							No plugin logs for this request.
