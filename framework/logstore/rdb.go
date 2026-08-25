@@ -4130,6 +4130,20 @@ func (s *RDBLogStore) FindByIDDetail(ctx context.Context, id string) (*Log, erro
 	return &log, nil
 }
 
+// FindByIDMessagesProjection 为 GET /api/logs/{id}/messages 瘦投影——仅为 messages 端点服务
+// 显式 SELECT 九列：前五列 id/timestamp/object_type/has_object/content_hidden 是 hybrid 水合判定与隐藏日志防护必要元数据，缺一不可；后四列 input_history/responses_input_history/output_message/responses_output 是消息实体
+// 避免读取 raw_request/raw_response 等大文本与模态列，降低 IO 与 AfterFind 反序列化开销；其余列保持零值，AfterFind 按列非空才 Unmarshal，不会误解析
+func (s *RDBLogStore) FindByIDMessagesProjection(ctx context.Context, id string) (*Log, error) {
+	var log Log
+	if err := s.ScopedDB(ctx).Select("id, timestamp, object_type, has_object, content_hidden, input_history, responses_input_history, output_message, responses_output").Where("id = ?", id).First(&log).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &log, nil
+}
+
 // IsLogEntryPresent checks if a log entry is present in the database.
 // Here we dont load entire log entry in memory - just check if it exists.
 func (s *RDBLogStore) IsLogEntryPresent(ctx context.Context, id string) (bool, error) {

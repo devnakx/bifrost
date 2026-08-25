@@ -443,6 +443,11 @@ var detailMetaPayloadFields = func() []string {
 	return out
 }()
 
+// messagesPayloadFields 为 messages 端点保留的 payload 字段集合——仅四列消息实体
+// 供 FindByIDMessagesProjection 的 hydrateLog requestedFields 使用
+var messagesPayloadFields = []string{"input_history", "responses_input_history", "output_message", "responses_output"}
+
+
 // FindByIDWithFields 按显式字段投影查询并按需水合
 func (h *HybridLogStore) FindByIDWithFields(ctx context.Context, id string, fields ...string) (*Log, error) {
 	needsHydration := len(fields) == 0 || fieldsNeedHydration(fields)
@@ -480,6 +485,28 @@ func (h *HybridLogStore) FindByIDDetail(ctx context.Context, id string) (*Log, e
 	h.hydrateLog(ctx, log, detailMetaPayloadFields...)
 	return log, nil
 }
+
+// FindByIDMessagesProjection 为 GET /api/logs/{id}/messages 九列瘦投影——仅为 messages 端点服务
+// 复用 RDB 的九列 SELECT 投影，避免读 raw/模态列；hybrid 层按投影字段水合
+func (h *HybridLogStore) FindByIDMessagesProjection(ctx context.Context, id string) (*Log, error) {
+	if mpStore, ok := h.inner.(interface {
+		FindByIDMessagesProjection(context.Context, string) (*Log, error)
+	}); ok {
+		log, err := mpStore.FindByIDMessagesProjection(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		h.hydrateLog(ctx, log, messagesPayloadFields...)
+		return log, nil
+	}
+	log, err := h.inner.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	h.hydrateLog(ctx, log, messagesPayloadFields...)
+	return log, nil
+}
+
 
 // hydrateLog fetches the offloaded payload from object storage and merges it
 // back into the Log struct. It is a no-op when HasObject is false.

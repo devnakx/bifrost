@@ -59,6 +59,7 @@ type LogStore interface {
 	FindByID(ctx context.Context, id string) (*Log, error)
 	FindByIDWithFields(ctx context.Context, id string, fields ...string) (*Log, error)
 	FindByIDDetail(ctx context.Context, id string) (*Log, error)
+	FindByIDMessagesProjection(ctx context.Context, id string) (*Log, error)
 	IsLogEntryPresent(ctx context.Context, id string) (bool, error)
 	FindFirst(ctx context.Context, query any, fields ...string) (*Log, error)
 	FindAll(ctx context.Context, query any, fields ...string) ([]*Log, error)
