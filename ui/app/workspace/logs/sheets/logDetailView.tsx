@@ -797,9 +797,9 @@ function CollapsibleCode({ text, preview = 3, lang, mono = true }: { text: strin
 	return (
 		<>
 			{mono ? (
-				<pre className="font-mono text-[12.5px] leading-[1.6] break-words whitespace-pre-wrap">{shown.join("\n")}</pre>
+				<pre className="font-mono text-[12.5px] leading-[1.6] break-all whitespace-pre-wrap">{shown.join("\n")}</pre>
 			) : (
-				<div className="text-[13px] leading-relaxed break-words whitespace-pre-wrap">{shown.join("\n")}</div>
+				<div className="text-[13px] leading-relaxed break-all whitespace-pre-wrap">{shown.join("\n")}</div>
 			)}
 			{hasMore && (
 				<div className="mt-1.5 flex items-center justify-between">
@@ -1518,7 +1518,8 @@ export function LogDetailView({
 													alt={detectedAppLabel}
 													width={20}
 													height={20}
-													loading="lazy"
+													loading="eager"
+													fetchPriority="high"
 													decoding="async"
 												/>
 											) : null}

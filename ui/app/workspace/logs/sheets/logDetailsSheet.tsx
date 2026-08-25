@@ -1,7 +1,7 @@
 import { SheetNavigationButtons } from "@/components/sheetNavigationButtons";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scrollArea";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { logsApi, useGetLogByIdQuery, useGetLogMessagesInfiniteQuery } from "@/lib/store/apis/logsApi";
 import { useGetPromptQuery } from "@/lib/store/apis/promptsApi";
 import { useAppDispatch } from "@/lib/store/hooks";
@@ -121,9 +121,12 @@ export function LogDetailSheet({
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
 			<SheetContent className="border-secondary flex w-full flex-col gap-4 overflow-hidden border p-4 sm:max-w-[60%] md:p-8">
+				<SheetTitle className="sr-only">Log details</SheetTitle>
+				<SheetDescription className="sr-only">
+					{isFullDataReady && displayLog ? `Details for log ${displayLog.id}` : "Log details"}
+				</SheetDescription>
 				{!isFullDataReady ? (
 					<div className="flex h-full items-center justify-center">
-						<SheetTitle className="sr-only">Loading log details</SheetTitle>
 						<Loader2 className="text-muted-foreground h-6 w-6 animate-spin" />
 					</div>
 				) : (

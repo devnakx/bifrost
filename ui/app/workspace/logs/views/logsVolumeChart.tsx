@@ -405,12 +405,12 @@ export function LogsVolumeChart({
 					</div>
 				</div>
 				<CollapsibleContent className="data-[state=closed]:animate-collapse-up data-[state=open]:animate-collapse-down overflow-hidden">
-					<div className="mt-2 h-32 select-none">
+					<div className="mt-2 h-40 w-full min-w-0 select-none">
 						{loading ? (
 							<Skeleton className="h-full w-full" />
-						) : hasValidData ? (
+						) : hasValidData && isOpen ? (
 							<ChartErrorBoundary resetKey={`${effectingTimeRange.startTime}-${effectingTimeRange.endTime}-${chartData.length}`}>
-								<ResponsiveContainer width="100%" height="100%">
+								<ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
 									<BarChart
 										data={chartData}
 										margin={{ top: 6, right: 4, left: 12, bottom: 0 }}
