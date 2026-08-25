@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { Info } from "lucide-react";
 
 interface Props {
+	"data-testid"?: string;
 	className?: string;
 	containerClassName?: string;
 	isBeta?: boolean;
@@ -26,6 +27,7 @@ export default function LogEntryDetailsView(props: Props) {
 	const orientation = props.orientation || "vertical";
 	return (
 		<div
+			data-testid={props["data-testid"]}
 			className={cn("items-top flex min-w-0 max-w-full flex-col gap-2", {
 				[`${props.className}`]: props.className !== undefined,
 				"items-start": props.align === "left" || props.align === undefined,

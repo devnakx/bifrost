@@ -1102,8 +1102,7 @@ export function LogDetailView({
 	})();
 
 	return (
-		<>
-			{/* Breadcrumb header with actions */}
+		<div data-testid="logdetails-content" data-loading={isDetailMetaLoading ? "true" : "false"}>
 			<div className="flex items-center justify-between gap-3">
 				<div className="text-muted-foreground flex items-center gap-2 text-sm">
 					{headerAction}
@@ -1492,6 +1491,7 @@ export function LogDetailView({
 						<BlockHeader title="Request Details" />
 						<div className="grid w-full grid-cols-1 items-start justify-between gap-4 md:grid-cols-3">
 							<LogEntryDetailsView
+								data-testid="logdetails-provider"
 								className="w-full"
 								label="Provider"
 								value={
@@ -1501,7 +1501,7 @@ export function LogDetailView({
 									</Badge>
 								}
 							/>
-							{!isContainer && <LogEntryDetailsView className="w-full" label="Model" value={log.model} />}
+							{!isContainer && <LogEntryDetailsView data-testid="logdetails-model" className="w-full" label="Model" value={log.model} />}
 							{!isContainer && log.alias && <LogEntryDetailsView className="w-full" label="Alias" value={log.alias} />}
 							{!isContainer && log.canonical_model_name && (
 								<LogEntryDetailsView className="w-full" label="Canonical Model" value={log.canonical_model_name} />
@@ -1536,6 +1536,7 @@ export function LogDetailView({
 								/>
 							)}
 							<LogEntryDetailsView
+								data-testid="logdetails-type"
 								className="w-full"
 								label="Type"
 								value={
@@ -3427,7 +3428,7 @@ export function LogDetailView({
 					)}
 				</TabsContent>
 			</Tabs>
-		</>
+		</div>
 	);
 }
 

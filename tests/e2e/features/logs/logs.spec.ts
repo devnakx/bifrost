@@ -1,6 +1,41 @@
 import { expect, test } from '../../core/fixtures/base.fixture'
 import { createLogSearchQuery, SAMPLE_MODELS, SAMPLE_PROVIDERS } from './logs.data'
 
+// 即开渲染测试夹具：列表行瘦身 + 详情全量分离（product 逻辑见 logDetailView.test.tsx）
+const listLogInstantOpen = {
+  id: 'e2e-instant-open-001',
+  request_id: 'req-e2e-instant-open-001',
+  object: 'chat.completion',
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  timestamp: '2026-08-26T08:00:00.000Z',
+  created_at: '2026-08-26T08:00:00.000Z',
+  input_history: [{ role: 'user', content: 'hello instant open' }],
+  output_message: { role: 'assistant', content: 'hi' },
+  status: 'success',
+  stream: false,
+  latency: 123,
+  cost: 0.001,
+  token_usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+  has_object: true,
+  content_hidden: false,
+  content_summary: 'hello instant open',
+  overhead_breakdown: undefined,
+  error_details: undefined,
+  routing_engine_logs: undefined,
+  plugin_logs: undefined,
+} as unknown as Record<string, unknown>
+
+const detailLogInstantOpen = {
+  ...listLogInstantOpen,
+  overhead_breakdown: [{ name: 'core', kind: 'internal', duration_us: 120 }],
+  overhead_latency: 0.12,
+  routing_engine_logs: '[1] [governance] - routing decision hydrated for e2e',
+  plugin_logs: JSON.stringify({ logging: [{ at: Date.now(), message: 'hydrated plugin log' }] }),
+  error_details: undefined,
+} as unknown as Record<string, unknown>
+
+
 test.describe('LLM Logs', () => {
   test.beforeEach(async ({ logsPage }) => {
     await logsPage.goto()
@@ -178,6 +213,7 @@ test.describe('LLM Logs', () => {
         expect(sheetVisible).toBe(false)
       }
     })
+
   })
 
   test.describe('Pagination', () => {
@@ -425,3 +461,99 @@ test.describe('LLM Logs', () => {
     })
   })
 })
+// 即开渲染：顶层分组不继承 LLM Logs beforeEach，自建 mock 后再进页（无真实后端亦可跑）
+test.describe('Log Details Instant Open', () => {
+  test('instant open: sheet immediate, list row fields immediate, detail fields skeleton then hydrated', async ({ logsPage, page }) => {
+    const detailDelayMs = 800
+    await page.route('**/api/config**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ is_db_connected: true, is_logs_connected: true }),
+      })
+    })
+    await page.route('**/api/logs/user-agent-mappings**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ mappings: [] }),
+      })
+    })
+    await page.route('**/api/logs**', async (route) => {
+      const url = new URL(route.request().url())
+      const pathname = url.pathname
+      const detailMatch = pathname.match(/^\/api\/logs\/([^/]+)$/)
+      if (detailMatch) {
+        const id = decodeURIComponent(detailMatch[1])
+        if (id === 'e2e-instant-open-001') {
+          await new Promise((r) => setTimeout(r, detailDelayMs))
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(detailLogInstantOpen),
+          })
+          return
+        }
+      }
+      if (pathname.includes('/messages') || pathname.includes('/raw')) {
+        const isRaw = pathname.endsWith('/raw')
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(isRaw ? { raw_request: '', raw_response: '' } : { messages: [], offset: 0, limit: 20, total: 0, has_more: false }),
+        })
+        return
+      }
+      if (pathname.startsWith('/api/logs/stats') || pathname.startsWith('/api/logs/histogram') || pathname.startsWith('/api/logs/filterdata')) {
+        await route.continue()
+        return
+      }
+      if (pathname === '/api/logs') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            logs: [listLogInstantOpen],
+            pagination: { limit: 25, offset: 0, sort_by: 'timestamp', order: 'desc', total_count: 1 },
+            stats: { total_requests: 1, success_rate: 100, user_facing_success_rate: 100, average_latency: 123, total_tokens: 30, prompt_tokens: 10, completion_tokens: 20, total_cost: 0.001 },
+            has_logs: true,
+          }),
+        })
+        return
+      }
+      await route.continue()
+    })
+
+    await logsPage.goto()
+    await expect(logsPage.logsTable).toBeVisible({ timeout: 10000 })
+    await expect(page.getByText('hello instant open').first()).toBeVisible({ timeout: 10000 })
+
+    const rows = logsPage.tableRows
+    await expect(rows.first()).toBeVisible({ timeout: 5000 })
+    // 先通过 URL 打开详情，验证 mock 下无需真实后端即可即开
+    await page.goto('/workspace/logs?selected_log=e2e-instant-open-001')
+    await expect(page).toHaveURL(/selected_log=e2e-instant-open-001/, { timeout: 5000 })
+    await expect(page.getByText('hello instant open').first()).toBeVisible({ timeout: 10000 })
+
+    const sheet = page.getByTestId('log-detail-sheet').or(page.locator('[role="dialog"]'))
+    await expect(sheet).toBeVisible({ timeout: 2000 })
+    const content = page.getByTestId('logdetails-content')
+    await expect(content).toBeVisible({ timeout: 500 })
+
+    await expect(page.getByTestId('logdetails-provider')).toBeAttached({ timeout: 2000 })
+    await expect(page.getByTestId('logdetails-model')).toBeAttached({ timeout: 2000 })
+    // 若在 ScrollArea 视口外，滚动后再校验可见性
+    await expect(page.getByText('Request details').first()).toBeVisible({ timeout: 500 })
+
+    const skeletons = page.locator('[data-testid^="logdetails-"][data-testid$="-skeleton"]')
+    const sawSkeleton = await skeletons.first().isVisible().catch(() => false)
+    if (sawSkeleton) {
+      await expect(skeletons.first()).toBeVisible({ timeout: 500 })
+    }
+
+    await expect.poll(async () => (await skeletons.count()) === 0, { timeout: 8000 }).toBe(true)
+    const hydrated = page.locator('text=/Overhead Breakdown|Routing Decision Logs|Plugin Logs/').first()
+    await expect(hydrated).toBeAttached({ timeout: 5000 })
+  })
+})
+
