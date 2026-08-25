@@ -1232,7 +1232,7 @@ func isDegenerateHybridWindow(start, end *time.Time) bool {
 func (s *RDBLogStore) countRawTerminal(ctx context.Context, dimFilters SearchFilters, timePredicate string, timeArgs ...any) (int64, error) {
 	var count int64
 	q := s.ScopedDB(ctx).Model(&Log{})
-	q = s.applyFilters(q, dimFilters)
+	q = s.applyFilters(q, dimFilters, false)
 	q = q.Where(timePredicate, timeArgs...)
 	if len(dimFilters.Status) == 0 {
 		q = q.Where("status IN ?", terminalLogStatuses)
@@ -1253,7 +1253,7 @@ func (s *RDBLogStore) countRawTerminal(ctx context.Context, dimFilters SearchFil
 func (s *RDBLogStore) countRawNonTerminal(ctx context.Context, filters SearchFilters) (int64, error) {
 	var count int64
 	q := s.ScopedDB(ctx).Model(&Log{})
-	q = s.applyFilters(q, filters)
+	q = s.applyFilters(q, filters, false)
 	q = q.Where("status IN ?", nonTerminalLogStatuses)
 	if err := q.Count(&count).Error; err != nil {
 		return 0, err
@@ -1320,7 +1320,7 @@ func (s *RDBLogStore) matViewInteriorStatsAgg(ctx context.Context, dimFilters Se
 func (s *RDBLogStore) rawTerminalStatsAgg(ctx context.Context, dimFilters SearchFilters, timePredicate string, timeArgs ...any) (matViewStatsAgg, error) {
 	var agg matViewStatsAgg
 	q := s.ScopedDB(ctx).Model(&Log{})
-	q = s.applyFilters(q, dimFilters)
+	q = s.applyFilters(q, dimFilters, false)
 	q = q.Where(timePredicate, timeArgs...)
 	if len(dimFilters.Status) == 0 {
 		q = q.Where("status IN ?", terminalLogStatuses)
@@ -1467,7 +1467,7 @@ func (s *RDBLogStore) getHistogramFromMatView(ctx context.Context, filters Searc
 	rawBucketed := func(timePredicate string, timeArgs ...any) ([]histAgg, error) {
 		var rows []histAgg
 		q := s.ScopedDB(ctx).Model(&Log{})
-		q = s.applyFilters(q, dimFilters)
+		q = s.applyFilters(q, dimFilters, false)
 		q = q.Where(timePredicate, timeArgs...)
 		q = q.Where("status IN ?", terminalLogStatuses)
 		err := q.Select(fmt.Sprintf(`

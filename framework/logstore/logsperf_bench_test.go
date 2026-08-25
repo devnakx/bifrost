@@ -248,7 +248,7 @@ func BenchmarkGetLogMessages(b *testing.B) {
 		{"rows_5000", 5000},
 		{"rows_100000", 100000},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
+		b.Run(tc.name+"/FindByID", func(b *testing.B) {
 			store := newBenchSQLiteStore(b)
 			ids, _, _ := seedBenchLogs(b, store, tc.rows)
 			rnd := rand.New(rand.NewSource(99))
@@ -264,6 +264,27 @@ func BenchmarkGetLogMessages(b *testing.B) {
 				row, err := store.FindByID(ctx, id)
 				if err != nil {
 					b.Fatalf("FindByID: %v", err)
+				}
+				if row == nil || row.ID == "" {
+					b.Fatalf("empty row")
+				}
+			}
+		})
+		b.Run(tc.name+"/FindByIDMessagesProjection", func(b *testing.B) {
+			store := newBenchSQLiteStore(b)
+			ids, _, _ := seedBenchLogs(b, store, tc.rows)
+			rnd := rand.New(rand.NewSource(99))
+			ctx := context.Background()
+			if _, err := store.FindByIDMessagesProjection(ctx, ids[0]); err != nil {
+				b.Fatalf("warmup FindByIDMessagesProjection: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				id := ids[rnd.Intn(len(ids))]
+				row, err := store.FindByIDMessagesProjection(ctx, id)
+				if err != nil {
+					b.Fatalf("FindByIDMessagesProjection: %v", err)
 				}
 				if row == nil || row.ID == "" {
 					b.Fatalf("empty row")

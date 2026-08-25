@@ -7,6 +7,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/objectstore"
+	"gorm.io/gorm"
 )
 
 // LogStoreType represents the type of log store.
@@ -242,4 +243,11 @@ func NewLogStore(ctx context.Context, config *Config, logger schemas.Logger) (Lo
 		return newHybridLogStore(inner, objStore, config.ObjectStorage.GetPrefix(), logger, config.ObjectStorageExcludeFields), nil
 	}
 	return inner, nil
+}
+
+// NewLogStoreWithDB 将已有的 *gorm.DB 包装为 RDBLogStore，不再另建连接或跑迁移
+// 调用方自理建表（AutoMigrate 或 triggerMigrations）与 gorm logger，以便测试观测真实 SQL
+// 仅供测试使用
+func NewLogStoreWithDB(db *gorm.DB, logger schemas.Logger) *RDBLogStore {
+	return &RDBLogStore{db: db, logger: logger}
 }
