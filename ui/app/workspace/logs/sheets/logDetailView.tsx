@@ -2603,15 +2603,36 @@ export function LogDetailView({
 									if (visibleRoles.size < 5 && !visibleRoles.has(rRole)) return null;
 									const text = extractResponsesText(responsesMsg, rRole === "reasoning" ? undefined : activeInputRevealMapping);
 									const reasoning = rRole === "reasoning" ? extractReasoningParts(responsesMsg, activeInputRevealMapping) : null;
+									const reasoningHasAny = !!reasoning && (reasoning.summaries.length > 0 || !!reasoning.encrypted || !!reasoning.contentText || reasoning.signatures.length > 0);
 									return (
 										<MessageRow key={idx} role={rRole} last={idx === (paginatedMessages as PaginatedMessage[]).length - 1 && !hasMoreMessages}>
 											{reasoning ? (
-												<div className="space-y-2">
-													{reasoning.contentText ? <CollapsibleCode text={reasoning.contentText} preview={3} mono={false} /> : null}
-													{reasoning.summaries.map((s: string, i: number) => (
-														<CollapsibleCode key={i} text={s} preview={3} mono={false} />
-													))}
-												</div>
+												reasoningHasAny ? (
+													<div className="space-y-3">
+														{reasoning.contentText ? <CollapsibleCode text={reasoning.contentText} preview={3} mono={false} /> : null}
+														{reasoning.summaries.map((s: string, i: number) => (
+															<div key={`s-${i}`} className="space-y-1">
+																{reasoning.summaries.length > 1 ? (
+																	<div className="text-muted-foreground text-[10.5px] font-semibold tracking-wider uppercase">
+																		Summary {i + 1}
+																	</div>
+																) : null}
+																<CollapsibleCode key={i} text={s} preview={3} mono={false} />
+															</div>
+														))}
+														{reasoning.encrypted ? (
+															<div className="space-y-1">
+																<div className="text-muted-foreground text-[10.5px] font-semibold tracking-wider uppercase">Encrypted</div>
+																<CollapsibleCode text={reasoning.encrypted} preview={2} />
+															</div>
+														) : null}
+														{reasoning.signatures.length > 0 ? (
+															<EncryptedReveal text={reasoning.signatures.join("\n\n")} label={reasoning.signatures.length > 1 ? "Encrypted signatures" : "Encrypted signature"} />
+														) : null}
+													</div>
+												) : (
+													<div className="text-muted-foreground text-[12px] italic">No reasoning content available</div>
+												)
 											) : text ? (
 												<CollapsibleCode text={text} preview={3} mono={false} />
 											) : (
