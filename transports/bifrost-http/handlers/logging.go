@@ -1083,7 +1083,7 @@ func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 		}
 		limit = i
 	}
-	log, err := h.logManager.GetLog(ctx, id)
+	log, err := h.logManager.GetLogMessagesPayload(ctx, id)
 	if err != nil {
 		if errors.Is(err, logstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "log not found")

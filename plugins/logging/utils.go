@@ -27,6 +27,8 @@ type LogManager interface {
 	GetLog(ctx context.Context, id string) (*logstore.Log, error)
 	// GetLogDetail retrieves slimmed log metadata for GET /api/logs/<id> (excludes heavy fields)
 	GetLogDetail(ctx context.Context, id string) (*logstore.Log, error)
+	// GetLogMessagesPayload retrieves slim projection for GET /api/logs/{id}/messages（仅四列消息实体）
+	GetLogMessagesPayload(ctx context.Context, id string) (*logstore.Log, error)
 
 	// Search searches for log entries based on filters and pagination
 	Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error)
@@ -201,6 +203,10 @@ func (p *PluginLogManager) GetLog(ctx context.Context, id string) (*logstore.Log
 
 func (p *PluginLogManager) GetLogDetail(ctx context.Context, id string) (*logstore.Log, error) {
 	return p.plugin.GetLogDetail(ctx, id)
+}
+
+func (p *PluginLogManager) GetLogMessagesPayload(ctx context.Context, id string) (*logstore.Log, error) {
+	return p.plugin.GetLogMessagesPayload(ctx, id)
 }
 
 func (p *PluginLogManager) Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error) {

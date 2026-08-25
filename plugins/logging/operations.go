@@ -1156,6 +1156,17 @@ func (p *LoggerPlugin) GetLogDetail(ctx context.Context, id string) (*logstore.L
 	return log, nil
 }
 
+// GetLogMessagesPayload retrieves slim projection for GET /api/logs/{id}/messages（仅四列消息实体）
+func (p *LoggerPlugin) GetLogMessagesPayload(ctx context.Context, id string) (*logstore.Log, error) {
+	if mpStore, ok := p.store.(interface {
+		FindByIDMessagesProjection(context.Context, string) (*logstore.Log, error)
+	}); ok {
+		return mpStore.FindByIDMessagesProjection(ctx, id)
+	}
+	// 回退：全量取回（保消息分页语义，DB 投影优化缺失时仍正确）
+	return p.store.FindByID(ctx, id)
+}
+
 // GetMCPToolLog retrieves a single MCP tool log entry by ID.
 func (p *LoggerPlugin) GetMCPToolLog(ctx context.Context, id string) (*logstore.MCPToolLog, error) {
 	return p.store.FindMCPToolLog(ctx, id)

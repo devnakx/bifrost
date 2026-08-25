@@ -585,6 +585,11 @@ func (m *dashboardLogManager) GetLog(ctx context.Context, id string) (*logstore.
 func (m *dashboardLogManager) GetLogDetail(ctx context.Context, id string) (*logstore.Log, error) {
 	return m.GetLog(ctx, id)
 }
+
+func (m *dashboardLogManager) GetLogMessagesPayload(ctx context.Context, id string) (*logstore.Log, error) {
+	return m.GetLog(ctx, id)
+}
+
 func (m *dashboardLogManager) Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error) {
 	return nil, nil
 }

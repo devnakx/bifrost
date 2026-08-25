@@ -67,9 +67,13 @@ func (m *countMock) GetLog(_ context.Context, _ string) (*logstore.Log, error) {
 func (m *countMock) GetLogDetail(_ context.Context, _ string) (*logstore.Log, error) {
 	return nil, nil
 }
+func (m *countMock) GetLogMessagesPayload(_ context.Context, _ string) (*logstore.Log, error) {
+	return nil, nil
+}
 func (m *countMock) GetSessionLogs(_ context.Context, _ string, _ *logstore.PaginationOptions) (*logstore.SessionDetailResult, error) {
 	return nil, nil
 }
+
 func (m *countMock) GetSessionSummary(_ context.Context, _ string) (*logstore.SessionSummaryResult, error) {
 	return nil, nil
 }
