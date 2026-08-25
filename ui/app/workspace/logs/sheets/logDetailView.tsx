@@ -2643,13 +2643,12 @@ export function LogDetailView({
 								})}
 							</div>
 							{hasMoreMessages ? (
-								<div className="flex items-center justify-center gap-2 pt-3">
-									{isFetchingMoreMessages ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+								<div className="flex justify-center pt-3">
 									<button
 										type="button"
 										onClick={() => onLoadMore?.()}
 										disabled={isFetchingMoreMessages}
-										className="text-primary text-xs hover:underline disabled:opacity-50"
+										className="text-primary inline-flex items-center justify-center gap-2 text-xs hover:underline disabled:opacity-50"
 									>
 										Load more
 									</button>

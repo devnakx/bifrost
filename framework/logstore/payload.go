@@ -494,54 +494,93 @@ func buildMCPToolInputPreview(l *MCPToolLog) string {
 	return ""
 }
 
-// BuildInputContentSummary extracts the last user message text from input fields.
-// This is used in hybrid mode for the content_summary column, which powers
-// full-text search and serves as a display fallback in the log list table.
-// Only the last message is kept — the full conversation history lives in
-// object storage and is merged back on FindByID.
+// BuildInputContentSummary 提取用于列表预览与搜索的摘要
+// 优先展示最新 assistant 输出，解决多轮 Responses 同质预览问题
+// chat 保持输入优先以兼容现有测试，responses 输出优先
 func (l *Log) BuildInputContentSummary() string {
-	// Chat completions: last user message
+	// Chat 完成：仍取末条 user 保持兼容
 	if idx := findLastUserMessageIndex(l.InputHistoryParsed); idx >= 0 {
 		if text := extractChatMessageText(&l.InputHistoryParsed[idx]); text != "" {
 			return text
 		}
 	}
 
-	// Responses API: last user message
+	// Responses：优先取末条 assistant 输出
+	if text := l.lastAssistantResponsesText(); text != "" {
+		return text
+	}
+
+	// Responses：回退末条真实 user，跳过 Codex 合成注入
 	for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
 		if l.ResponsesInputHistoryParsed[i].Role != nil && *l.ResponsesInputHistoryParsed[i].Role == schemas.ResponsesInputMessageRoleUser {
 			if text := extractResponsesMessageText(&l.ResponsesInputHistoryParsed[i]); text != "" {
+				if isSyntheticResponsesUserText(text) {
+					continue
+				}
 				return text
 			}
 		}
 	}
 
-	// Speech input
+	// Speech 输入
 	if l.SpeechInputParsed != nil && l.SpeechInputParsed.Input != "" {
 		return l.SpeechInputParsed.Input
 	}
 
-	// Image generation input prompt
+	// 图像/视频等其他输入
 	if l.ImageGenerationInputParsed != nil && l.ImageGenerationInputParsed.Prompt != "" {
 		return l.ImageGenerationInputParsed.Prompt
 	}
-
-	// Image edit input prompt
 	if l.ImageEditInputParsed != nil && l.ImageEditInputParsed.Prompt != "" {
 		return l.ImageEditInputParsed.Prompt
 	}
-
-	// Video generation input prompt
 	if l.VideoGenerationInputParsed != nil && l.VideoGenerationInputParsed.Prompt != "" {
 		return l.VideoGenerationInputParsed.Prompt
 	}
-
-	// Video edit input prompt
 	if l.VideoEditInputParsed != nil && l.VideoEditInputParsed.Prompt != "" {
 		return l.VideoEditInputParsed.Prompt
 	}
 
 	return ""
+}
+
+// lastAssistantResponsesText 返回 responses 输出中末条 assistant 文本
+func (l *Log) lastAssistantResponsesText() string {
+	for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
+		if l.ResponsesOutputParsed[i].Role != nil && *l.ResponsesOutputParsed[i].Role == schemas.ResponsesInputMessageRoleAssistant {
+			if text := extractResponsesMessageText(&l.ResponsesOutputParsed[i]); text != "" {
+				return text
+			}
+		}
+	}
+	// 回退 chat 输出
+	if l.OutputMessageParsed != nil {
+		if text := extractChatMessageText(l.OutputMessageParsed); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// isSyntheticResponsesUserText 判断 Codex 合成注入的 user 文本
+func isSyntheticResponsesUserText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "<environment_context>") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "# AGENTS.md") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "<skills_instructions>") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "<app-context>") {
+		return true
+	}
+	return false
 }
 
 // extractChatMessageText returns the text content from a ChatMessage.

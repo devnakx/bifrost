@@ -127,7 +127,7 @@ export function LogDetailSheet({
 						<Loader2 className="text-muted-foreground h-6 w-6 animate-spin" />
 					</div>
 				) : (
-					<ScrollArea viewportRef={viewportRef} className="flex min-h-0 flex-1 flex-col" viewportClassName="flex-1">
+					<ScrollArea viewportRef={viewportRef} className="flex min-h-0 flex-1 flex-col" viewportClassName="flex-1 [&>div]:!block [&>div]:!min-w-0">
 						<LogDetailView
 							log={displayLog}
 							resolvedSelectedPromptName={resolvedSelectedPromptName}
