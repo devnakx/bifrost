@@ -526,6 +526,10 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 // realtime `sess_…`) match no log id and stay top-level, as do self-referencing
 // rows — parent_request_id is client-settable, and a row that points at itself
 // would otherwise be unreachable from any view.
+//
+// SQLite 走物化 NOT IN 分支的原因与权衡：COUNT 路径与数据页路径复用同一谓词，
+// COUNT 受益于一次建集无需逐行相关子查询；数据页路径在窗口极大时物化成本随窗口行数增长，
+// 由 BenchmarkSearchLogsRootsOnly 的 5k/100k 两档护栏兜底，若 10 万行档 ns/op 或 allocs/op 劣化超 20% 则收窄为仅 COUNT 分支物化
 func (s *RDBLogStore) applyRootsOnlyFilter(baseQuery *gorm.DB, filters SearchFilters) *gorm.DB {
 	ctx := baseQuery.Statement.Context
 	if ctx == nil {
@@ -538,7 +542,7 @@ func (s *RDBLogStore) applyRootsOnlyFilter(baseQuery *gorm.DB, filters SearchFil
 	parentFilters.RootsOnly = false
 	parentFilters.ParentRequestID = ""
 
-	if s.db.Dialector.Name() == "clickhouse" {
+	if s.db.Dialector.Name() == "clickhouse" || s.db.Dialector.Name() == "sqlite" {
 		// ClickHouse has no correlated subqueries, so the parent id set is built
 		// once per query. The inherited filters (crucially the time window) bound
 		// it — an unfiltered `SELECT id FROM logs` would materialize every id in
