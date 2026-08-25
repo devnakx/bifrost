@@ -966,6 +966,9 @@ func (s *RDBLogStore) searchLogs(ctx context.Context, filters SearchFilters, pag
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
+		if pagination.SkipCount {
+			return nil
+		}
 		// Pagination total count uses the same time-window hybrid as
 		// /api/logs/stats: short windows go raw so the count stays consistent
 		// with the (always-raw) row list rendered alongside it. Long windows
