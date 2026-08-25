@@ -42,6 +42,11 @@ type LoggingHandler struct {
 	filterDataCache    filterDataCache
 	mcpFilterDataCache filterDataCache
 
+	// logsCountCache memoizes COUNT for /api/logs list queries. Polling pages
+	// hit the same filters repeatedly; a short TTL collapses the duplicate COUNT
+	// into one DB roundtrip per window per caller.
+	logsCountCache filterDataCache
+
 	// sidekiqRunner runs the background cost-recalculation job; sidekiqStore reads
 	// job rows for status/dedup. Both are nil until SetSidekiqBackend wires them,
 	// in which case the recalculate-cost endpoints return 503.
@@ -77,6 +82,9 @@ const sessionLogPageLimit = 500
 // dropdowns promptly without hiding results beyond the matview refresh cadence.
 const filterDataCacheTTL = 30 * time.Second
 
+// logsCountCacheTTL is shorter than filterDataCacheTTL: list counts go stale
+// faster than filter dropdowns and polling pages expect fresh totals promptly.
+const logsCountCacheTTL = 12 * time.Second
 const filterDataFanOutLimit = 4
 
 const defaultFilterDataLimit = 1000
@@ -299,8 +307,12 @@ func (c *filterDataCache) load(key string) (*filterDataCacheEntry, map[string]in
 }
 
 func (c *filterDataCache) store(entry *filterDataCacheEntry, payload map[string]interface{}) {
+	c.storeWithTTL(entry, payload, filterDataCacheTTL)
+}
+
+func (c *filterDataCache) storeWithTTL(entry *filterDataCacheEntry, payload map[string]interface{}, ttl time.Duration) {
 	entry.payload = payload
-	entry.expiresAt = time.Now().Add(filterDataCacheTTL)
+	entry.expiresAt = time.Now().Add(ttl)
 	entry.mu.Unlock()
 }
 
@@ -308,6 +320,110 @@ func (c *filterDataCache) release(entry *filterDataCacheEntry) {
 	entry.mu.Unlock()
 }
 
+func (c *filterDataCache) purge() {
+	c.mu.Lock()
+	c.entries = make(map[string]*filterDataCacheEntry)
+	c.mu.Unlock()
+}
+
+// buildLogsCountCacheKey 枚举式构造计数缓存 key：全部非零 filters 字段按确定序拼接
+// 加上调用方身份分区，排除 pagination 维度；period 非空时用 period 原始字符串
+// period 为空时才用显式 start_time/end_time 原始字符串
+func buildLogsCountCacheKey(filters *logstore.SearchFilters, rawPeriod, rawStartTime, rawEndTime, identity string) string {
+	var b strings.Builder
+	b.WriteString("who=")
+	b.WriteString(identity)
+	appendSortedSlice := func(name string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		sorted := make([]string, len(vals))
+		copy(sorted, vals)
+		sort.Strings(sorted)
+		b.WriteString("|")
+		b.WriteString(name)
+		b.WriteString("=")
+		b.WriteString(strings.Join(sorted, ","))
+	}
+	appendSortedSlice("providers", filters.Providers)
+	appendSortedSlice("models", filters.Models)
+	appendSortedSlice("aliases", filters.Aliases)
+	appendSortedSlice("status", filters.Status)
+	appendSortedSlice("objects", filters.Objects)
+	if filters.ParentRequestID != "" {
+		b.WriteString("|parent_request_id=")
+		b.WriteString(filters.ParentRequestID)
+	}
+	appendSortedSlice("selected_key_ids", filters.SelectedKeyIDs)
+	appendSortedSlice("virtual_key_ids", filters.VirtualKeyIDs)
+	appendSortedSlice("routing_rule_ids", filters.RoutingRuleIDs)
+	appendSortedSlice("team_ids", filters.TeamIDs)
+	appendSortedSlice("customer_ids", filters.CustomerIDs)
+	appendSortedSlice("user_ids", filters.UserIDs)
+	appendSortedSlice("business_unit_ids", filters.BusinessUnitIDs)
+	appendSortedSlice("routing_engine_used", filters.RoutingEngineUsed)
+	appendSortedSlice("stop_reasons", filters.StopReasons)
+	appendSortedSlice("user_agents", filters.UserAgents)
+	appendSortedSlice("apps", filters.Apps)
+	if rawPeriod != "" {
+		b.WriteString("|period=")
+		b.WriteString(rawPeriod)
+	} else {
+		if rawStartTime != "" {
+			b.WriteString("|start_time=")
+			b.WriteString(rawStartTime)
+		}
+		if rawEndTime != "" {
+			b.WriteString("|end_time=")
+			b.WriteString(rawEndTime)
+		}
+	}
+	if filters.MinLatency != nil {
+		b.WriteString("|min_latency=")
+		b.WriteString(strconv.FormatFloat(*filters.MinLatency, 'g', -1, 64))
+	}
+	if filters.MaxLatency != nil {
+		b.WriteString("|max_latency=")
+		b.WriteString(strconv.FormatFloat(*filters.MaxLatency, 'g', -1, 64))
+	}
+	if filters.MinTokens != nil {
+		b.WriteString("|min_tokens=")
+		b.WriteString(strconv.Itoa(*filters.MinTokens))
+	}
+	if filters.MaxTokens != nil {
+		b.WriteString("|max_tokens=")
+		b.WriteString(strconv.Itoa(*filters.MaxTokens))
+	}
+	if filters.MinCost != nil {
+		b.WriteString("|min_cost=")
+		b.WriteString(strconv.FormatFloat(*filters.MinCost, 'g', -1, 64))
+	}
+	if filters.MaxCost != nil {
+		b.WriteString("|max_cost=")
+		b.WriteString(strconv.FormatFloat(*filters.MaxCost, 'g', -1, 64))
+	}
+	if filters.MissingCostOnly {
+		b.WriteString("|missing_cost_only=true")
+	}
+	appendSortedSlice("cache_hit_types", filters.CacheHitTypes)
+	if filters.RootsOnly {
+		b.WriteString("|roots_only=true")
+	}
+	if len(filters.MetadataFilters) > 0 {
+		keys := make([]string, 0, len(filters.MetadataFilters))
+		for k := range filters.MetadataFilters {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			b.WriteString("|metadata_")
+			b.WriteString(k)
+			b.WriteString("=")
+			b.WriteString(filters.MetadataFilters[k])
+		}
+	}
+	return b.String()
+}
 func parseParentRequestIDFilter(ctx *fasthttp.RequestCtx) string {
 	if parentRequestID := string(ctx.QueryArgs().Peek("parent_request_id")); strings.TrimSpace(parentRequestID) != "" {
 		return parentRequestID
@@ -609,10 +725,14 @@ func (h *LoggingHandler) getLogSessionSummaryByID(ctx *fasthttp.RequestCtx) {
 
 // getLogs handles GET /api/logs - Get logs with filtering, search, and pagination via query parameters
 func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
+	// 捕获时间窗原始语义用于缓存 key：period 非空时用 period 原始字符串
+	// period 为空时才用显式 start_time/end_time 原始字符串
+	rawPeriod := string(ctx.QueryArgs().Peek("period"))
+	rawStartTimeStr := string(ctx.QueryArgs().Peek("start_time"))
+	rawEndTimeStr := string(ctx.QueryArgs().Peek("end_time"))
 	// Parse query parameters into filters
 	filters := &logstore.SearchFilters{}
 	pagination := &logstore.PaginationOptions{}
-
 	// Extract filters from query parameters
 	if providers := string(ctx.QueryArgs().Peek("providers")); providers != "" {
 		filters.Providers = parseCommaSeparated(providers)
@@ -771,13 +891,55 @@ func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	result, err := h.logManager.Search(ctx, filters, pagination)
-	if err != nil {
-		logger.Error("failed to search logs: %v", err)
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
-		return
+	var result *logstore.SearchResult
+	var err error
+	// content_search 非空直通不查不存缓存
+	if filters.ContentSearch != "" {
+		result, err = h.logManager.Search(ctx, filters, pagination)
+		if err != nil {
+			logger.Error("failed to search logs: %v", err)
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
+			return
+		}
+	} else {
+		cacheKey := buildLogsCountCacheKey(filters, rawPeriod, rawStartTimeStr, rawEndTimeStr, filterDataCacheIdentity(ctx))
+		entry, cached, hit := h.logsCountCache.load(cacheKey)
+		if hit {
+			// 命中：跳过 COUNT，用缓存值覆盖 TotalCount 与 TotalRequests
+			pagination.SkipCount = true
+			result, err = h.logManager.Search(ctx, filters, pagination)
+			if err != nil {
+				logger.Error("failed to search logs: %v", err)
+				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
+				return
+			}
+			if countRaw, ok := cached["count"]; ok {
+				var cachedCount int64
+				switch v := countRaw.(type) {
+				case int64:
+					cachedCount = v
+				case int:
+					cachedCount = int64(v)
+				case int32:
+					cachedCount = int64(v)
+				case float64:
+					cachedCount = int64(v)
+				}
+				result.Pagination.TotalCount = cachedCount
+				result.Stats.TotalRequests = cachedCount
+			}
+		} else {
+			// 未命中：正常 Search，成功后写入缓存；失败路径必须 release
+			result, err = h.logManager.Search(ctx, filters, pagination)
+			if err != nil {
+				h.logsCountCache.release(entry)
+				logger.Error("failed to search logs: %v", err)
+				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
+				return
+			}
+			h.logsCountCache.storeWithTTL(entry, map[string]interface{}{"count": result.Pagination.TotalCount}, logsCountCacheTTL)
+		}
 	}
-
 	selectedKeyIDs := make(map[string]struct{})
 	virtualKeyIDs := make(map[string]struct{})
 	routingRuleIDs := make(map[string]struct{})
@@ -2154,6 +2316,8 @@ func (h *LoggingHandler) deleteLogs(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to delete logs")
 		return
 	}
+
+	h.logsCountCache.purge()
 
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Logs deleted successfully",
