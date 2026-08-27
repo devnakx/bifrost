@@ -597,20 +597,10 @@ func HandleOpenAITextCompletionStreaming(
 		var created int
 		lastChunkTime := startTime
 
-		var drainDeadline time.Time
 		for {
-			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
+			// If context was cancelled/timed out, let defer handle it
 			if ctx.Err() != nil {
-				if drainDeadline.IsZero() {
-					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
-						drainDeadline = time.Now().Add(grace)
-					} else {
-						return
-					}
-				}
-				if time.Now().After(drainDeadline) {
-					return
-				}
+				return
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -628,7 +618,10 @@ func HandleOpenAITextCompletionStreaming(
 			jsonData := string(data)
 			var response schemas.BifrostTextCompletionResponse
 			if customResponseHandler != nil {
+				// Custom handler decodes the raw event itself -> time as "response-parse" stream phase.
+				parseStart := time.Now()
 				rawRequest, rawResponse, handlerErr := customResponseHandler([]byte(jsonData), &response, nil, sendBackRawRequest, sendBackRawResponse)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
 				if handlerErr != nil {
 					// TODO fix this
 					if sendBackRawRequest {
@@ -656,9 +649,14 @@ func HandleOpenAITextCompletionStreaming(
 					}
 				}
 
-				// Parse into bifrost response
-				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logStreamParseFailure(logger, ctx.Err(), err)
+				// Parse into bifrost response. Timed as the "response-parse" stream phase
+				// (per-event JSON decode) so it lands in Serialization like unary/Anthropic,
+				// instead of folding into core/provider-internal.
+				parseStart := time.Now()
+				umErr := sonic.UnmarshalString(jsonData, &response)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
+				if umErr != nil {
+					logger.Warn("Failed to parse stream response: %v", umErr)
 					continue
 				}
 			}
@@ -669,7 +667,11 @@ func HandleOpenAITextCompletionStreaming(
 			}
 
 			if postResponseConverter != nil {
-				if converted := postResponseConverter(&response); converted != nil {
+				// Per-event mapping -> "convertor" (Convertor) stream phase.
+				convStart := time.Now()
+				converted := postResponseConverter(&response)
+				schemas.AddStreamConvert(ctx, time.Since(convStart))
+				if converted != nil {
 					response = *converted
 				} else {
 					logger.Warn("postResponseConverter returned nil; leaving chunk unmodified")
@@ -702,14 +704,6 @@ func HandleOpenAITextCompletionStreaming(
 					usage.PromptTokensDetails = response.Usage.PromptTokensDetails
 				}
 				response.Usage = nil
-			}
-
-			// drain 窗口：usage 已并入句柄，见到 finish_reason 即退出按真实值结算
-			if ctx.Err() != nil {
-				if len(response.Choices) > 0 && response.Choices[0].FinishReason != nil && *response.Choices[0].FinishReason != "" {
-					return
-				}
-				continue
 			}
 
 			// Skip empty responses or responses without choices
@@ -1245,20 +1239,10 @@ func HandleOpenAIChatCompletionStreaming(
 		// instead of a silent stream close.
 		fallbackFinishReasonSeen := false
 
-		var drainDeadline time.Time
 		for {
-			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
+			// If context was cancelled/timed out, let defer handle it
 			if ctx.Err() != nil {
-				if drainDeadline.IsZero() {
-					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
-						drainDeadline = time.Now().Add(grace)
-					} else {
-						return
-					}
-				}
-				if time.Now().After(drainDeadline) {
-					return
-				}
+				return
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -1291,7 +1275,10 @@ func HandleOpenAIChatCompletionStreaming(
 			// Parse into bifrost response
 			var response schemas.BifrostChatResponse
 			if customResponseHandler != nil {
+				// Custom handler decodes the raw event itself -> time as "response-parse" stream phase.
+				parseStart := time.Now()
 				rawRequest, rawResponse, handlerErr := customResponseHandler([]byte(jsonData), &response, nil, sendBackRawRequest, sendBackRawResponse)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
 				if handlerErr != nil {
 					if sendBackRawRequest {
 						handlerErr.ExtraFields.RawRequest = rawRequest
@@ -1304,8 +1291,12 @@ func HandleOpenAIChatCompletionStreaming(
 					return
 				}
 			} else {
-				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logStreamParseFailure(logger, ctx.Err(), err)
+				// Per-event decode -> "response-parse" (Serialization) stream phase.
+				parseStart := time.Now()
+				umErr := sonic.UnmarshalString(jsonData, &response)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
+				if umErr != nil {
+					logger.Warn("Failed to parse stream response: %v", umErr)
 					continue
 				}
 			}
@@ -1313,15 +1304,6 @@ func HandleOpenAIChatCompletionStreaming(
 			// choices be array if nil
 			if response.Choices == nil {
 				response.Choices = []schemas.BifrostResponseChoice{}
-			}
-
-			// drain 窗口：只提取 usage 与结束标记，终止即退出按真实值结算
-			if ctx.Err() != nil {
-				providerUtils.AccumulateLLMUsage(usage, response.Usage)
-				if len(response.Choices) > 0 && response.Choices[0].FinishReason != nil && *response.Choices[0].FinishReason != "" {
-					return
-				}
-				continue
 			}
 
 			if isResponsesToChatCompletionsFallback {
@@ -1355,7 +1337,10 @@ func HandleOpenAIChatCompletionStreaming(
 					}
 				}
 
+				// Per-event mapping (chat->responses) -> "convertor" (Convertor) stream phase.
+				convStart := time.Now()
 				spreadResponses := response.ToBifrostResponsesStreamResponse(responsesStreamState)
+				schemas.AddStreamConvert(ctx, time.Since(convStart))
 				for _, response := range spreadResponses {
 					if response.Type == schemas.ResponsesStreamResponseTypeError {
 						bifrostErr := &schemas.BifrostError{
@@ -1398,7 +1383,11 @@ func HandleOpenAIChatCompletionStreaming(
 				}
 			} else {
 				if postResponseConverter != nil {
-					if converted := postResponseConverter(&response); converted != nil {
+					// Per-event mapping -> "convertor" (Convertor) stream phase.
+					convStart := time.Now()
+					converted := postResponseConverter(&response)
+					schemas.AddStreamConvert(ctx, time.Since(convStart))
+					if converted != nil {
 						response = *converted
 					} else {
 						logger.Warn("postResponseConverter returned nil; leaving chunk unmodified")
@@ -1951,52 +1940,13 @@ func HandleOpenAIResponsesStreaming(
 		}
 
 		sseReader := providerUtils.GetSSEDataReader(ctx, reader)
-		usage := &schemas.BifrostLLMUsage{}
-		// 保存已收到的 usage，让客户端取消时仍能结算上游已经消耗的 token
-		ctx.SetValue(schemas.BifrostContextKeyStreamAccumulatedUsage, usage)
-		accumulateUsage := func(candidate *schemas.BifrostLLMUsage) {
-			if candidate == nil {
-				return
-			}
-			if candidate.PromptTokens > usage.PromptTokens {
-				usage.PromptTokens = candidate.PromptTokens
-			}
-			if candidate.CompletionTokens > usage.CompletionTokens {
-				usage.CompletionTokens = candidate.CompletionTokens
-			}
-			if candidate.TotalTokens > usage.TotalTokens {
-				usage.TotalTokens = candidate.TotalTokens
-			}
-			if total := usage.PromptTokens + usage.CompletionTokens; total > usage.TotalTokens {
-				usage.TotalTokens = total
-			}
-			if candidate.PromptTokensDetails != nil {
-				usage.PromptTokensDetails = candidate.PromptTokensDetails
-			}
-			if candidate.CompletionTokensDetails != nil {
-				usage.CompletionTokensDetails = candidate.CompletionTokensDetails
-			}
-			if candidate.Cost != nil {
-				usage.Cost = candidate.Cost
-			}
-		}
 
 		lastChunkTime := startTime
 
-		var drainDeadline time.Time
 		for {
-			// 客户端取消后进入 drain 窗口：限期继续读上游终止事件以结算真实 usage
+			// If context was cancelled/timed out, let defer handle it
 			if ctx.Err() != nil {
-				if drainDeadline.IsZero() {
-					if grace := providerUtils.GetStreamCancellationGrace(ctx); grace > 0 {
-						drainDeadline = time.Now().Add(grace)
-					} else {
-						return
-					}
-				}
-				if time.Now().After(drainDeadline) {
-					return
-				}
+				return
 			}
 			data, readErr := sseReader.ReadDataLine()
 			if readErr != nil {
@@ -2019,7 +1969,10 @@ func HandleOpenAIResponsesStreaming(
 			// Parse into bifrost response
 			var response schemas.BifrostResponsesStreamResponse
 			if customResponseHandler != nil {
+				// Custom handler decodes the raw event itself -> time as "response-parse" stream phase.
+				parseStart := time.Now()
 				rawRequest, rawResponse, bifrostErr := customResponseHandler([]byte(jsonData), &response, nil, sendBackRawRequest, sendBackRawResponse)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
 				if bifrostErr != nil {
 					if sendBackRawRequest {
 						bifrostErr.ExtraFields.RawRequest = rawRequest
@@ -2035,13 +1988,21 @@ func HandleOpenAIResponsesStreaming(
 					response.ExtraFields.RawResponse = jsonData
 				}
 			} else {
-				if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-					logStreamParseFailure(logger, ctx.Err(), err)
+				// Per-event decode -> "response-parse" (Serialization) stream phase.
+				parseStart := time.Now()
+				umErr := sonic.UnmarshalString(jsonData, &response)
+				schemas.AddStreamParse(ctx, time.Since(parseStart))
+				if umErr != nil {
+					logger.Warn("Failed to parse stream response: %v", umErr)
 					continue
 				}
 
 				if postResponseConverter != nil {
-					if converted := postResponseConverter(&response); converted != nil {
+					// Per-event mapping -> "convertor" (Convertor) stream phase.
+					convStart := time.Now()
+					converted := postResponseConverter(&response)
+					schemas.AddStreamConvert(ctx, time.Since(convStart))
+					if converted != nil {
 						response = *converted
 					} else {
 						logger.Warn("postResponseConverter returned nil; leaving chunk unmodified")
@@ -2051,19 +2012,6 @@ func HandleOpenAIResponsesStreaming(
 				if sendBackRawResponse {
 					response.ExtraFields.RawResponse = jsonData
 				}
-			}
-
-			// drain 窗口：只提取 usage，终止事件即退出按真实值结算
-			if ctx.Err() != nil {
-				if response.Response != nil {
-					accumulateUsage(response.Response.Usage.ToBifrostLLMUsage())
-				}
-				switch response.Type {
-				case schemas.ResponsesStreamResponseTypeCompleted, schemas.ResponsesStreamResponseTypeIncomplete,
-					schemas.ResponsesStreamResponseTypeError, schemas.ResponsesStreamResponseTypeFailed:
-					return
-				}
-				continue
 			}
 
 			if response.Type == schemas.ResponsesStreamResponseTypeError {
@@ -2081,10 +2029,6 @@ func HandleOpenAIResponsesStreaming(
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, providerUtils.EnrichError(ctx, bifrostErr, jsonBody, []byte(jsonData), sendBackRawRequest, sendBackRawResponse, latency), responseChan, logger, postHookSpanFinalizer)
 				return
-			}
-
-			if response.Response != nil {
-				accumulateUsage(response.Response.Usage.ToBifrostLLMUsage())
 			}
 
 			response.ExtraFields.ChunkIndex = response.SequenceNumber
@@ -2652,7 +2596,7 @@ func HandleOpenAISpeechStreamRequest(
 			// Parse into bifrost response
 			var response schemas.BifrostSpeechStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logStreamParseFailure(logger, ctx.Err(), err)
+				logger.Warn("Failed to parse stream response: %v", err)
 				continue
 			}
 
@@ -3175,7 +3119,7 @@ func HandleOpenAITranscriptionStreamRequest(
 				}
 
 				if err := sonic.UnmarshalString(jsonData, response); err != nil {
-					logStreamParseFailure(logger, ctx.Err(), err)
+					logger.Warn("Failed to parse stream response: %v", err)
 					continue
 
 				}
@@ -3623,7 +3567,7 @@ func HandleOpenAIImageGenerationStreaming(
 			// Parse minimally to extract usage and check for errors
 			var response OpenAIImageStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logStreamParseFailure(logger, ctx.Err(), err)
+				logger.Warn("Failed to parse stream response: %v", err)
 				continue
 			}
 
@@ -5229,7 +5173,7 @@ func HandleOpenAIImageEditStreamRequest(
 			// Parse minimally to extract usage and check for errors
 			var response OpenAIImageStreamResponse
 			if err := sonic.UnmarshalString(jsonData, &response); err != nil {
-				logStreamParseFailure(logger, ctx.Err(), err)
+				logger.Warn("Failed to parse stream response: %v", err)
 				continue
 			}
 

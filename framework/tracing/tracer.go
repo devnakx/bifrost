@@ -451,7 +451,19 @@ func (t *Tracer) PopulateLLMResponseAttributes(ctx *schemas.BifrostContext, hand
 		return
 	}
 	respAttrs := PopulateResponseAttributes(resp)
+	// A cancelled stream arrives here with an accumulated response whose usage
+	// is missing the final chunk, so its aggregate token counts read zero. When
+	// the error carries the authoritative BilledUsage, drop those zeros from
+	// the response side: PopulateErrorAttributes gates its own emissions on
+	// > 0, so a zero stamped here would survive the merge and turn "not
+	// recorded" into a false zero on the span.
+	billed := err != nil && err.ExtraFields.BilledUsage != nil
 	for k, v := range respAttrs {
+		if billed && (k == schemas.AttrInputTokens || k == schemas.AttrOutputTokens || k == schemas.AttrTotalTokens) {
+			if n, ok := v.(int); ok && n == 0 {
+				continue
+			}
+		}
 		if k == schemas.AttrFinishReasons {
 			// Spec: gen_ai.response.finish_reasons (string[]) belongs on the GenAI (llm.call) span.
 			span.SetAttribute(schemas.AttrFinishReasons, v)
@@ -501,7 +513,19 @@ func (t *Tracer) PopulateLLMResponseAttributes(ctx *schemas.BifrostContext, hand
 			ef.RequestType,
 			modelcatalog.PricingLookupScopesFromContext(ctx, string(ef.Provider)),
 		)
-		span.SetAttribute(schemas.AttrUsageCost, cost)
+		// When the catalog cannot price the model, fall back to the cost the
+		// provider itself reported (deep-copied into BilledUsage by
+		// attachBilledUsageFromContext) rather than discarding it.
+		if cost == 0 && ef.BilledUsage.Cost != nil {
+			cost = ef.BilledUsage.Cost.TotalCost
+		}
+		// Guarded write: a resp == nil failure emitted no cost attribute before
+		// this path existed, and consumers rely on distinguishing "no cost
+		// recorded" from a genuine zero (see plugins/logging, which guards the
+		// same way).
+		if cost > 0 {
+			span.SetAttribute(schemas.AttrUsageCost, cost)
+		}
 	} else if t.pricingManager != nil && resp != nil {
 		cost := t.pricingManager.CalculateCost(resp, modelcatalog.PricingLookupScopesFromContext(ctx, string(resp.GetExtraFields().Provider)))
 		span.SetAttribute(schemas.AttrUsageCost, cost)
