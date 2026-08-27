@@ -49,6 +49,7 @@ import {
 	Wallet,
 	WalletCards,
 	Webhook,
+	FlaskConical,
 } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
