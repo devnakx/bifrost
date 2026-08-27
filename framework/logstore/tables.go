@@ -103,6 +103,7 @@ type PaginationOptions struct {
 	SortBy     string `json:"sort_by"`     // "timestamp", "latency", "tokens", "cost"
 	Order      string `json:"order"`       // "asc", "desc"
 	TotalCount int64  `json:"total_count"` // Total number of items matching the query
+	SkipCount  bool   `json:"-"`           // 传输层计数缓存命中时的提示位，置 true 时 TotalCount/Stats.TotalRequests 返回零值，由调用方负责填充
 }
 
 // SearchResult represents the result of a log search
