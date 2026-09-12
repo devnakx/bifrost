@@ -22,6 +22,7 @@ interface LogDetailSheetProps {
 	canReveal?: boolean;
 	onViewSession?: (sessionId: string, logId: string) => void;
 	onFilterByParentRequestId?: (parentRequestId: string) => void;
+	onFilterBySessionId?: (sessionId: string) => void;
 }
 
 export function LogDetailSheet({
@@ -35,6 +36,7 @@ export function LogDetailSheet({
 	canReveal = false,
 	onViewSession,
 	onFilterByParentRequestId,
+	onFilterBySessionId,
 }: LogDetailSheetProps) {
 	const dispatch = useAppDispatch();
 	const [pollingInterval, setPollingInterval] = useState(0);
@@ -140,6 +142,7 @@ export function LogDetailSheet({
 						onLoadMore={() => {
 							if (hasNextPage && !isFetchingNextPage) fetchNextPage();
 						}}
+						onFilterBySessionId={onFilterBySessionId}
 						headerAction={
 							<>
 								{displayLog.parent_request_id && onViewSession ? (

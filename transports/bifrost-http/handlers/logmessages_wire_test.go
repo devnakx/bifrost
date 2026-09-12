@@ -385,6 +385,12 @@ func (m *fallbackLogManager) GetAvailableCustomers(_ context.Context, _ int, _ s
 func (m *fallbackLogManager) GetAvailableUsers(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+func (m *fallbackLogManager) GetAvailableProjects(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
+	return nil, nil
+}
+func (m *fallbackLogManager) GetAvailableToolCallNames(_ context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
 func (m *fallbackLogManager) GetAvailableBusinessUnits(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }

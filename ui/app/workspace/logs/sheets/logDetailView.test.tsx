@@ -20,6 +20,7 @@ vi.mock("@/components/ui/tooltip", () => ({ Tooltip: ({children}:any)=> children
 vi.mock("@/components/ui/truncatedLabel", () => ({ TruncatedLabel: ({children}:any)=> children }));
 vi.mock("@/lib/store", () => ({
 	useGetUserAgentMappingsQuery: () => ({ data: { mappings: [] } }),
+	useGetProvidersQuery: () => ({ data: undefined, isLoading: false, isError: true }),
 }));
 vi.mock("@/lib/store/apis/logsApi", () => ({
 	useLazyGetLogRawQuery: () => [vi.fn(), { data: undefined, isFetching: false }],

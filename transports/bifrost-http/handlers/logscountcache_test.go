@@ -153,6 +153,12 @@ func (m *countMock) GetAvailableCustomers(_ context.Context, _ int, _ string) ([
 func (m *countMock) GetAvailableUsers(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+func (m *countMock) GetAvailableProjects(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
+	return nil, nil
+}
+func (m *countMock) GetAvailableToolCallNames(_ context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
 func (m *countMock) GetAvailableBusinessUnits(_ context.Context, _ int, _ string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
