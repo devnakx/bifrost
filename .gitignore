@@ -11,6 +11,9 @@ bifrost-data
 test-coverage-local.sh
 
 .omo/
+.gitnexus/
+.zvec-grep/
+.netcatty-paste-images/
 
 # Enterprise
 ui/app/enterprise
