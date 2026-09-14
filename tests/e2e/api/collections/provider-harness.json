@@ -5070,6 +5070,49 @@
             {
               "name": "8.2.B Native /v1/responses streaming × all providers",
               "description": "Streaming Responses-API via native endpoint.",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// Regression (fix/responses-stream-item-null): Responses SSE must omit item on",
+                      "// non-output events while preserving a non-null item object on output_item events.",
+                      "if (pm.response.code >= 400) { return; }",
+                      "var types = {};",
+                      "var nonOutputItemFields = 0;",
+                      "var outputItemEvents = 0;",
+                      "var outputItemObjects = 0;",
+                      "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                      "  if (l.indexOf('data: ') !== 0) { return; }",
+                      "  var p = l.slice(6).trim();",
+                      "  if (p === '[DONE]') { return; }",
+                      "  try {",
+                      "    var j = JSON.parse(p);",
+                      "    if (j.type) { types[j.type] = (types[j.type] || 0) + 1; }",
+                      "    if (j.type === 'response.output_item.added' || j.type === 'response.output_item.done') {",
+                      "      outputItemEvents++;",
+                      "      if (j.item && typeof j.item === 'object' && !Array.isArray(j.item)) { outputItemObjects++; }",
+                      "      return;",
+                      "    }",
+                      "    if ('item' in j) { nonOutputItemFields++; }",
+                      "  } catch (e) {}",
+                      "});",
+                      "pm.test('Responses stream emits response.created and response.completed', function () {",
+                      "  pm.expect(types['response.created'], 'expected response.created').to.not.be.undefined;",
+                      "  pm.expect(types['response.completed'], 'expected response.completed').to.not.be.undefined;",
+                      "});",
+                      "pm.test('Regression: non-output events omit item entirely', function () {",
+                      "  pm.expect(nonOutputItemFields, 'found ' + nonOutputItemFields + ' non-output events carrying item').to.equal(0);",
+                      "});",
+                      "pm.test('Regression: output_item events keep non-null item objects', function () {",
+                      "  pm.expect(outputItemEvents, 'expected at least one output_item event').to.be.above(0);",
+                      "  pm.expect(outputItemObjects, 'every output_item event must carry a non-null item object').to.equal(outputItemEvents);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
               "item": [
                 {
                   "name": "openai/gpt-4o-mini",
@@ -36375,7 +36418,7 @@
     },
     {
       "name": "13. OpenRouter Prompt Caching (cache_control)",
-      "description": "Sends OpenAI-format chat requests through the OpenRouter provider with Anthropic-style cache_control breakpoints on content blocks and tools. OpenRouter forwards cache_control to Claude/Gemini (explicit caching) and harmlessly ignores it for implicit-caching models (OpenAI/DeepSeek) — these must NOT 400. Bifrost preserves cache_control only when the provider is OpenRouter (stripped for native OpenAI).",
+      "description": "Sends OpenAI-format chat requests through the OpenRouter provider with Anthropic-style cache_control breakpoints on content blocks and tools. OpenRouter forwards cache_control to Claude/Gemini (explicit caching) and harmlessly ignores it for implicit-caching models (OpenAI/DeepSeek) \u2014 these must NOT 400. Bifrost preserves cache_control only when the provider is OpenRouter (stripped for native OpenAI).",
       "item": [
         {
           "name": "OpenRouter Anthropic Claude: cache_control on system block",
@@ -148278,6 +148321,536 @@
               ]
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "84. Fallback re-targets image edit requests (#6966)",
+      "description": "prepareFallbackRequest had no arm for image edit, image variation and video edit, so a fallback attempt kept the primary sub-request pointer and was routed back to the primary while RoutingInfo reported it as a fallback. The case posts a multipart image edit whose primary model does not exist and whose only fallback is a model the harness already edits with. Red before the fix (the retry re-runs the invalid model and the request fails), green after (served by the fallback, reported as fallback index 1).",
+      "item": [
+        {
+          "name": "runware image edit fallback re-targets to runware:101@1 after an invalid primary model (#6966)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "model",
+                  "value": "runware/does-not-exist:0@0",
+                  "type": "text"
+                },
+                {
+                  "key": "fallbacks",
+                  "value": "runware/runware:101@1",
+                  "type": "text"
+                },
+                {
+                  "key": "prompt",
+                  "value": "make the background a deep blue",
+                  "type": "text"
+                },
+                {
+                  "key": "image",
+                  "src": "tests/e2e/api/fixtures/sample.png",
+                  "type": "file"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/images/edits",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "images",
+                "edits"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('served by the fallback instead of failing on the primary', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "pm.test('routing headers name the fallback, not the primary', function () {",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-routing-info-is-fallback')).to.equal('true');",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-fallback-index')).to.equal('1');",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-routing-info-model')).to.equal('runware:101@1');",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-routing-info-primary-model')).to.equal('does-not-exist:0@0');",
+                  "});",
+                  "pm.test('returns an edited image', function () {",
+                  "  var d = pm.response.json().data;",
+                  "  pm.expect(d, 'no data: ' + pm.response.text()).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(!!(d[0].url || d[0].b64_json), 'no asset returned').to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "85. Bedrock compaction routes Claude to InvokeModel (#6825)",
+      "description": "Regression for #6825: a compact_20260112 edit on a bedrock/<claude> model was accepted, the compact-2026-01-12 header forwarded, and nothing compacted, because the Bedrock provider sent every Claude request through the Converse API, which AWS documents as unable to run compaction (\"Compaction is currently not supported by the Converse API, however it is supported with InvokeModel\", https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html). Bifrost now routes such requests to InvokeModel / InvokeModelWithResponseStream with the native Anthropic Messages body. These cases stay under the 50k-token compaction trigger (cheap) and pin the egress through the response shape: usage.iterations is only ever returned by the native Anthropic body, never by Converse, and the streaming case asserts it inside the message_delta frame. Gateway 5xx fails these cases rather than skipping, since a mis-routed InvokeModel call surfaces as one; 503 and 529 are skipped only when the body names a provider capacity condition (ServiceUnavailable / overloaded_error). When the gateway has client_config.allow_per_request_raw_override enabled, x-bf-send-back-raw-request additionally exposes the outbound body and the cases assert the InvokeModel shape (anthropic_version bedrock-2023-05-31, no model field) plus the compaction edit and beta on the wire. Case 1 is the reporter's ingress (/anthropic/v1/messages, which stores context_management in ExtraParams); case 2 is its streaming variant; case 3 is the /v1/responses ingress, which stores context_management in the typed request field, so both routing inputs are covered. Folder 59 separately pins compaction billing on the Claude API.",
+      "item": [
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /anthropic/v1/messages compaction edit egresses via InvokeModel - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-beta",
+                "value": "compact-2026-01-12"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just the word ok.\"}],\"context_management\":{\"edits\":[{\"type\":\"compact_20260112\",\"trigger\":{\"type\":\"input_tokens\",\"value\":50000}}]}}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock compaction /anthropic: 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "pm.test('bedrock compaction /anthropic: reply content present', function () {",
+                  "  pm.expect((body.content || []).length, 'empty content: ' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock compaction /anthropic: usage.iterations present, which only the native InvokeModel body returns', function () {",
+                  "  pm.expect((body.usage || {}).iterations, 'usage.iterations missing: the Converse API never returns compaction iterations, so the request did not egress via InvokeModel (#6825). usage=' + JSON.stringify(body.usage)).to.be.an('array');",
+                  "});",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "if (!rr || typeof rr !== 'object') {",
+                  "  console.log('bedrock compaction /anthropic: raw_request not captured (x-bf-send-back-raw-request needs client_config.allow_per_request_raw_override); egress pinned via response shape only');",
+                  "  return;",
+                  "}",
+                  "var dump = JSON.stringify(rr);",
+                  "pm.test('bedrock compaction /anthropic: raw_request shows InvokeModel egress, not Converse', function () {",
+                  "  pm.expect(rr.anthropic_version, 'anthropic_version missing: the request went to Converse. body=' + dump).to.eql('bedrock-2023-05-31');",
+                  "  pm.expect(rr, 'InvokeModel body must not carry model (it is in the URL): ' + dump).to.not.have.property('model');",
+                  "  pm.expect(rr, 'Converse body shape leaked: ' + dump).to.not.have.property('inferenceConfig');",
+                  "});",
+                  "pm.test('bedrock compaction /anthropic: compaction edit and beta reached the wire', function () {",
+                  "  var edits = (rr.context_management || {}).edits || [];",
+                  "  pm.expect(edits.length, 'context_management.edits missing: ' + dump).to.be.above(0);",
+                  "  pm.expect(edits[0].type, 'edit type: ' + dump).to.eql('compact_20260112');",
+                  "  pm.expect(rr.anthropic_beta || [], 'anthropic_beta: ' + dump).to.include('compact-2026-01-12');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /anthropic/v1/messages stream compaction edit completes via InvokeModelWithResponseStream - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-beta",
+                "value": "compact-2026-01-12"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_tokens\":32,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with just the word ok.\"}],\"context_management\":{\"edits\":[{\"type\":\"compact_20260112\",\"trigger\":{\"type\":\"input_tokens\",\"value\":50000}}]}}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock compaction /anthropic stream: 200', function () {",
+                  "  pm.expect(pm.response.code, 'stream request failed: ' + pm.response.text()).to.equal(200);",
+                  "});",
+                  "var body = pm.response.text() || '';",
+                  "pm.test('bedrock compaction /anthropic stream: native Anthropic SSE frames, no error event', function () {",
+                  "  pm.expect(body, 'expected SSE frames').to.include('data:');",
+                  "  pm.expect(body, 'expected message_start').to.include('message_start');",
+                  "  pm.expect(body, 'expected message_stop').to.include('message_stop');",
+                  "  pm.expect(body, 'stream carried an error event (the AWS event-stream decode path broke, e.g. checksum mismatch on a mangled InvokeModel URL): ' + body.slice(0, 600)).to.not.include('\"type\":\"error\"');",
+                  "  pm.expect(body, 'checksum mismatch means the reply was not an event stream').to.not.include('checksum mismatch');",
+                  "});",
+                  "pm.test('bedrock compaction /anthropic stream: message_delta usage.iterations present, which only the native InvokeModel body returns', function () {",
+                  "  // Parse the SSE data lines and take the usage from the message_delta event",
+                  "  // itself, so text in an unrelated frame cannot satisfy the check.",
+                  "  var lines = body.split('\\n');",
+                  "  var deltaUsage = null;",
+                  "  for (var i = 0; i < lines.length; i++) {",
+                  "    if (lines[i].indexOf('data:') !== 0) { continue; }",
+                  "    var evt = null;",
+                  "    try { evt = JSON.parse(lines[i].slice(5).trim()); } catch (e) { continue; }",
+                  "    if (evt && evt.type === 'message_delta' && evt.usage) { deltaUsage = evt.usage; }",
+                  "  }",
+                  "  pm.expect(deltaUsage, 'no message_delta frame with usage in the stream: tail=' + body.slice(-600)).to.be.an('object');",
+                  "  pm.expect(deltaUsage.iterations, 'message_delta.usage.iterations missing: the Converse API never returns compaction iterations, so the stream did not egress via InvokeModelWithResponseStream (#6825). usage=' + JSON.stringify(deltaUsage)).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /v1/responses compaction edit egresses via InvokeModel - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_output_tokens\":32,\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"Reply with just the word ok.\"}],\"context_management\":{\"edits\":[{\"type\":\"compact_20260112\",\"trigger\":{\"type\":\"input_tokens\",\"value\":50000}}]}}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock compaction /v1/responses: 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "pm.test('bedrock compaction /v1/responses: output present', function () {",
+                  "  pm.expect((body.output || []).length, 'empty output: ' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock compaction /v1/responses: usage.iterations present, which only the native InvokeModel body returns', function () {",
+                  "  pm.expect((body.usage || {}).iterations, 'usage.iterations missing: the Converse API never returns compaction iterations, so the request did not egress via InvokeModel (#6825). usage=' + JSON.stringify(body.usage)).to.be.an('array');",
+                  "});",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "if (!rr || typeof rr !== 'object') {",
+                  "  console.log('bedrock compaction /v1/responses: raw_request not captured (x-bf-send-back-raw-request needs client_config.allow_per_request_raw_override); egress pinned via response shape only');",
+                  "  return;",
+                  "}",
+                  "var dump = JSON.stringify(rr);",
+                  "pm.test('bedrock compaction /v1/responses: raw_request shows InvokeModel egress, not Converse', function () {",
+                  "  pm.expect(rr.anthropic_version, 'anthropic_version missing: the request went to Converse. body=' + dump).to.eql('bedrock-2023-05-31');",
+                  "  pm.expect(rr, 'InvokeModel body must not carry model (it is in the URL): ' + dump).to.not.have.property('model');",
+                  "  pm.expect(rr, 'Converse body shape leaked: ' + dump).to.not.have.property('inferenceConfig');",
+                  "});",
+                  "pm.test('bedrock compaction /v1/responses: compaction edit and beta reached the wire', function () {",
+                  "  var edits = (rr.context_management || {}).edits || [];",
+                  "  pm.expect(edits.length, 'context_management.edits missing: ' + dump).to.be.above(0);",
+                  "  pm.expect(edits[0].type, 'edit type: ' + dump).to.eql('compact_20260112');",
+                  "  pm.expect(rr.anthropic_beta || [], 'anthropic_beta: ' + dump).to.include('compact-2026-01-12');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "71. Bedrock tool search routes Claude to InvokeModel (#6825)",
+      "description": "Follow-up to #6825: Anthropic server-side tool search (tool_search_tool_regex / tool_search_tool_bm25 plus defer_loading on function tools) is InvokeModel-only on AWS (\"On Amazon Bedrock, server-side tool search is available only through the InvokeModel API, not the Converse API\", https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool). Bifrost used to strip the tool and defer_loading for bedrock/ models because its Bedrock provider only spoke Converse; it now routes such requests to InvokeModel / InvokeModelWithResponseStream. The cases pin the behaviour through the response: the deferred get_weather tool must be discovered through tool search and actually called (a tool_use / function_call named get_weather; a search alone is not enough, and neither is an unnamed tool call). Gateway 5xx fails these cases; 503 and 529 are skipped only when the body names a provider capacity condition. When the gateway has client_config.allow_per_request_raw_override enabled, x-bf-send-back-raw-request additionally exposes the outbound body and the cases assert the InvokeModel shape plus the tool_search tool, defer_loading and the tool-search-tool-2025-10-19 beta on the wire. Case 1 is the native /anthropic/v1/messages ingress, case 2 its streaming variant, case 3 the /v1/responses ingress with the neutral \"tool_search\" tool type. The Claude API accept-path for tool search lives in folder 12.",
+      "item": [
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /anthropic/v1/messages tool_search + defer_loading egresses via InvokeModel - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-beta",
+                "value": "tool-search-tool-2025-10-19"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather in Paris right now? Search your tools and use the right one.\"}],\"tools\":[{\"type\":\"tool_search_tool_regex_20251119\",\"name\":\"tool_search_tool_regex\"},{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]},\"defer_loading\":true}]}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock tool_search /anthropic: 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "pm.test('bedrock tool_search /anthropic: deferred get_weather tool was discovered and called', function () {",
+                  "  var blocks = body.content || [];",
+                  "  var called = false;",
+                  "  for (var i = 0; i < blocks.length; i++) {",
+                  "    if (blocks[i].type === 'tool_use' && blocks[i].name === 'get_weather') { called = true; }",
+                  "  }",
+                  "  pm.expect(called, 'no tool_use named get_weather: the deferred tool was not discovered through tool search and expanded (#6825). blocks=' + JSON.stringify(blocks.map(function (b) { return b.type + (b.name ? ':' + b.name : ''); }))).to.be.true;",
+                  "});",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('bedrock tool_search /anthropic: raw_request captured (the harness Makefile enables allow_per_request_raw_override)', function () {",
+                  "  pm.expect(rr, 'extra_fields.raw_request missing: InvokeModel egress cannot be verified. body=' + pm.response.text()).to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var dump = JSON.stringify(rr);",
+                  "pm.test('bedrock tool_search /anthropic: raw_request shows InvokeModel egress, not Converse', function () {",
+                  "  pm.expect(rr.anthropic_version, 'anthropic_version missing: the request went to Converse. body=' + dump).to.eql('bedrock-2023-05-31');",
+                  "  pm.expect(rr, 'InvokeModel body must not carry model (it is in the URL): ' + dump).to.not.have.property('model');",
+                  "  pm.expect(rr, 'Converse body shape leaked: ' + dump).to.not.have.property('inferenceConfig');",
+                  "});",
+                  "pm.test('bedrock tool_search /anthropic: tool_search tool, defer_loading and beta reached the wire', function () {",
+                  "  var tools = rr.tools || [];",
+                  "  var sawSearch = false, sawDeferred = false;",
+                  "  for (var i = 0; i < tools.length; i++) {",
+                  "    if (String(tools[i].type || '').indexOf('tool_search_tool_') === 0) { sawSearch = true; }",
+                  "    if (tools[i].name === 'get_weather' && tools[i].defer_loading === true) { sawDeferred = true; }",
+                  "  }",
+                  "  pm.expect(sawSearch, 'tool_search tool was stripped: ' + dump).to.be.true;",
+                  "  pm.expect(sawDeferred, 'defer_loading was stripped from get_weather: ' + dump).to.be.true;",
+                  "  pm.expect(rr.anthropic_beta || [], 'anthropic_beta: ' + dump).to.include('tool-search-tool-2025-10-19');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /anthropic/v1/messages stream tool_search completes via InvokeModelWithResponseStream - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-beta",
+                "value": "tool-search-tool-2025-10-19"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_tokens\":256,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"What is the weather in Paris right now? Search your tools and use the right one.\"}],\"tools\":[{\"type\":\"tool_search_tool_regex_20251119\",\"name\":\"tool_search_tool_regex\"},{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]},\"defer_loading\":true}]}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock tool_search /anthropic stream: 200', function () {",
+                  "  pm.expect(pm.response.code, 'stream request failed: ' + pm.response.text()).to.equal(200);",
+                  "});",
+                  "var body = pm.response.text() || '';",
+                  "pm.test('bedrock tool_search /anthropic stream: native Anthropic SSE frames, no error event', function () {",
+                  "  pm.expect(body, 'expected SSE frames').to.include('data:');",
+                  "  pm.expect(body, 'expected message_start').to.include('message_start');",
+                  "  pm.expect(body, 'expected message_stop').to.include('message_stop');",
+                  "  pm.expect(body, 'stream carried an error event: ' + body.slice(0, 600)).to.not.include('\"type\":\"error\"');",
+                  "});",
+                  "pm.test('bedrock tool_search /anthropic stream: deferred get_weather tool was discovered and called', function () {",
+                  "  pm.expect(body, 'no tool_use content block named get_weather in the stream (#6825): ' + body.slice(0, 800)).to.match(/\"type\":\"tool_use\"[^\\n]*?\"name\":\"get_weather\"/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.anthropic.claude-sonnet-4-6 /v1/responses tool_search + defer_loading egresses via InvokeModel - #6825",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_output_tokens\":256,\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"What is the weather in Paris right now? Search your tools and use the right one.\"}],\"tools\":[{\"type\":\"tool_search\",\"name\":\"tool_search_tool_regex\"},{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]},\"defer_loading\":true}]}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "pm.test('bedrock tool_search /v1/responses: 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "pm.test('bedrock tool_search /v1/responses: deferred get_weather tool was discovered and called', function () {",
+                  "  var items = body.output || [];",
+                  "  var called = false;",
+                  "  for (var i = 0; i < items.length; i++) {",
+                  "    if (items[i].type === 'function_call' && items[i].name === 'get_weather') { called = true; }",
+                  "  }",
+                  "  pm.expect(called, 'no function_call named get_weather: the deferred tool was not discovered through tool search and expanded (#6825). items=' + JSON.stringify(items.map(function (o) { return o.type + (o.name ? ':' + o.name : ''); }))).to.be.true;",
+                  "});",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('bedrock tool_search /v1/responses: raw_request captured (the harness Makefile enables allow_per_request_raw_override)', function () {",
+                  "  pm.expect(rr, 'extra_fields.raw_request missing: InvokeModel egress cannot be verified. body=' + pm.response.text()).to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var dump = JSON.stringify(rr);",
+                  "pm.test('bedrock tool_search /v1/responses: raw_request shows InvokeModel egress, not Converse', function () {",
+                  "  pm.expect(rr.anthropic_version, 'anthropic_version missing: the request went to Converse. body=' + dump).to.eql('bedrock-2023-05-31');",
+                  "  pm.expect(rr, 'InvokeModel body must not carry model (it is in the URL): ' + dump).to.not.have.property('model');",
+                  "  pm.expect(rr, 'Converse body shape leaked: ' + dump).to.not.have.property('inferenceConfig');",
+                  "});",
+                  "pm.test('bedrock tool_search /v1/responses: tool_search tool, defer_loading and beta reached the wire', function () {",
+                  "  var tools = rr.tools || [];",
+                  "  var sawSearch = false, sawDeferred = false;",
+                  "  for (var i = 0; i < tools.length; i++) {",
+                  "    if (String(tools[i].type || '').indexOf('tool_search_tool_') === 0) { sawSearch = true; }",
+                  "    if (tools[i].name === 'get_weather' && tools[i].defer_loading === true) { sawDeferred = true; }",
+                  "  }",
+                  "  pm.expect(sawSearch, 'tool_search tool was stripped: ' + dump).to.be.true;",
+                  "  pm.expect(sawDeferred, 'defer_loading was stripped from get_weather: ' + dump).to.be.true;",
+                  "  pm.expect(rr.anthropic_beta || [], 'anthropic_beta: ' + dump).to.include('tool-search-tool-2025-10-19');",
+                  "});"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
