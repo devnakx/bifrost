@@ -504,31 +504,54 @@ func buildMCPToolInputPreview(l *MCPToolLog) string {
 }
 
 // BuildInputContentSummary 提取用于列表预览与搜索的摘要
-// 优先展示最新 assistant 输出，解决多轮 Responses 同质预览问题
-// chat 保持输入优先以兼容现有测试，responses 输出优先
+// 按请求顺序优先返回最后一条带文本的 user/assistant 消息，无消息文本时回退最后一条推理摘要
 func (l *Log) BuildInputContentSummary() string {
-	// Chat 完成：仍取末条 user 保持兼容
-	if idx := findLastUserMessageIndex(l.InputHistoryParsed); idx >= 0 {
-		if text := extractChatMessageText(&l.InputHistoryParsed[idx]); text != "" {
-			return text
+	if len(l.InputHistoryParsed) > 0 || l.OutputMessageParsed != nil {
+		if l.OutputMessageParsed != nil {
+			if text := extractChatMessageText(l.OutputMessageParsed); text != "" {
+				return text
+			}
+		}
+		for i := len(l.InputHistoryParsed) - 1; i >= 0; i-- {
+			msg := &l.InputHistoryParsed[i]
+			if msg.Role != schemas.ChatMessageRoleUser && msg.Role != schemas.ChatMessageRoleAssistant {
+				continue
+			}
+			if text := extractChatMessageText(msg); text != "" {
+				return text
+			}
 		}
 	}
 
-	// Responses：优先取末条 assistant 输出
-	if text := l.lastAssistantResponsesText(); text != "" {
-		return text
-	}
-
-	// Responses：回退末条真实 user，跳过 Codex 合成注入
-	for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
-		if l.ResponsesInputHistoryParsed[i].Role != nil && *l.ResponsesInputHistoryParsed[i].Role == schemas.ResponsesInputMessageRoleUser {
-			if text := extractResponsesMessageText(&l.ResponsesInputHistoryParsed[i]); text != "" {
-				if isSyntheticResponsesUserText(text) {
+	if len(l.ResponsesInputHistoryParsed) > 0 || len(l.ResponsesOutputParsed) > 0 {
+		for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
+			msg := &l.ResponsesOutputParsed[i]
+			if msg.Role == nil || (*msg.Role != schemas.ResponsesInputMessageRoleUser && *msg.Role != schemas.ResponsesInputMessageRoleAssistant) {
+				continue
+			}
+			if text := extractResponsesMessageText(msg); text != "" {
+				return text
+			}
+		}
+		for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
+			msg := &l.ResponsesInputHistoryParsed[i]
+			if msg.Role == nil || (*msg.Role != schemas.ResponsesInputMessageRoleUser && *msg.Role != schemas.ResponsesInputMessageRoleAssistant) {
+				continue
+			}
+			if text := extractResponsesMessageText(msg); text != "" {
+				if *msg.Role == schemas.ResponsesInputMessageRoleUser && isSyntheticResponsesUserText(text) {
 					continue
 				}
 				return text
 			}
 		}
+	}
+
+	if text := l.lastChatReasoningText(); text != "" {
+		return text
+	}
+	if text := l.lastResponsesReasoningText(); text != "" {
+		return text
 	}
 
 	// Speech 输入
@@ -553,19 +576,41 @@ func (l *Log) BuildInputContentSummary() string {
 	return ""
 }
 
-// lastAssistantResponsesText 返回 responses 输出中末条 assistant 文本
-func (l *Log) lastAssistantResponsesText() string {
-	for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
-		if l.ResponsesOutputParsed[i].Role != nil && *l.ResponsesOutputParsed[i].Role == schemas.ResponsesInputMessageRoleAssistant {
-			if text := extractResponsesMessageText(&l.ResponsesOutputParsed[i]); text != "" {
-				return text
-			}
+func (l *Log) lastChatReasoningText() string {
+	if l.OutputMessageParsed != nil {
+		if text := chatReasoningPreview(l.OutputMessageParsed); text != nil && *text != "" {
+			return *text
 		}
 	}
-	// 回退 chat 输出
-	if l.OutputMessageParsed != nil {
-		if text := extractChatMessageText(l.OutputMessageParsed); text != "" {
+	for i := len(l.InputHistoryParsed) - 1; i >= 0; i-- {
+		if text := chatReasoningPreview(&l.InputHistoryParsed[i]); text != nil && *text != "" {
+			return *text
+		}
+	}
+	return ""
+}
+
+func (l *Log) lastResponsesReasoningText() string {
+	for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
+		if text := lastResponsesMessageReasoningText(&l.ResponsesOutputParsed[i]); text != "" {
 			return text
+		}
+	}
+	for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
+		if text := lastResponsesMessageReasoningText(&l.ResponsesInputHistoryParsed[i]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func lastResponsesMessageReasoningText(msg *schemas.ResponsesMessage) string {
+	if msg.ResponsesReasoning == nil {
+		return ""
+	}
+	for i := len(msg.ResponsesReasoning.Summary) - 1; i >= 0; i-- {
+		if text := strings.TrimSpace(msg.ResponsesReasoning.Summary[i].Text); text != "" {
+			return truncateRunes(text, maxListOutputPreviewRunes)
 		}
 	}
 	return ""

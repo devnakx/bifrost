@@ -117,20 +117,67 @@ func TestClearPayload_DoesNotTouchIndexFields(t *testing.T) {
 	assert.Empty(t, log.InputHistory)
 }
 
-func TestBuildInputContentSummary(t *testing.T) {
-	content := "What is the weather?"
-	log := &Log{
-		InputHistoryParsed: []schemas.ChatMessage{
-			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &content}},
+func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
+	chatUser := "What is the weather?"
+	chatAssistant := "It's sunny"
+	chatHistoryAssistant := "Earlier assistant answer"
+	responsesUser := "生成一张图"
+	responsesAssistant := "图片已生成"
+	responsesReasoning := "正在处理图片"
+
+	tests := []struct {
+		name string
+		log  Log
+		want string
+	}{
+		{
+			name: "chat output assistant is later than input user",
+			log: Log{
+				InputHistoryParsed: []schemas.ChatMessage{
+					{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &chatUser}},
+				},
+				OutputMessageParsed: &schemas.ChatMessage{
+					Role:    schemas.ChatMessageRoleAssistant,
+					Content: &schemas.ChatMessageContent{ContentStr: &chatAssistant},
+				},
+			},
+			want: chatAssistant,
 		},
-		OutputMessageParsed: &schemas.ChatMessage{
-			Content: &schemas.ChatMessageContent{ContentStr: strPtr("It's sunny")},
+		{
+			name: "last assistant in chat history beats earlier user",
+			log: Log{
+				InputHistoryParsed: []schemas.ChatMessage{
+					{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &chatUser}},
+					{Role: schemas.ChatMessageRoleAssistant, Content: &schemas.ChatMessageContent{ContentStr: &chatHistoryAssistant}},
+				},
+			},
+			want: chatHistoryAssistant,
+		},
+		{
+			name: "responses output assistant is later than input user",
+			log: Log{
+				ResponsesInputHistoryParsed: []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleUser, responsesUser)},
+				ResponsesOutputParsed:       []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleAssistant, responsesAssistant)},
+			},
+			want: responsesAssistant,
+		},
+		{
+			name: "reasoning is fallback when no user or assistant text exists",
+			log: Log{
+				ResponsesOutputParsed: []schemas.ResponsesMessage{{
+					Type:              schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
+				}},
+			},
+			want: responsesReasoning,
 		},
 	}
 
-	summary := log.BuildInputContentSummary()
-	assert.Contains(t, summary, "What is the weather?")
-	assert.NotContains(t, summary, "It's sunny", "BuildInputContentSummary should not include output")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.log.BuildInputContentSummary())
+		})
+	}
 }
 
 func TestTrimListPayloadPreviews(t *testing.T) {

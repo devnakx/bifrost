@@ -142,7 +142,7 @@ func TestHybrid_ContentHiddenBatchMixed(t *testing.T) {
 	visibleRow, err := inner.FindByID(ctx, "batch-visible")
 	require.NoError(t, err)
 	assert.False(t, visibleRow.ContentHidden)
-	assert.Contains(t, visibleRow.ContentSummary, "sensitive question")
+	assert.Equal(t, "sensitive answer", visibleRow.ContentSummary)
 
 	hiddenRow, err := inner.FindByID(ctx, "batch-hidden")
 	require.NoError(t, err)

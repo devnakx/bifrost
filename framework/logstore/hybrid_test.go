@@ -698,7 +698,7 @@ func TestHybrid_MetadataIsRetainedInDBAndWrittenToObjectPayload(t *testing.T) {
 	assert.Equal(t, "payments", found.MetadataParsed["team"])
 }
 
-func TestHybrid_ContentSummaryIsInputOnly(t *testing.T) {
+func TestHybrid_ContentSummaryUsesLastTextMessage(t *testing.T) {
 	hybrid, inner, _ := newTestHybrid(t)
 	defer hybrid.Close(context.Background())
 	ctx := context.Background()
@@ -725,8 +725,7 @@ func TestHybrid_ContentSummaryIsInputOnly(t *testing.T) {
 	// Read from inner DB to check content_summary.
 	dbLog, err := inner.FindByID(ctx, "summary-1")
 	require.NoError(t, err)
-	assert.Contains(t, dbLog.ContentSummary, "capital of France")
-	assert.NotContains(t, dbLog.ContentSummary, "Paris", "content_summary should not contain output text")
+	assert.Equal(t, outputText, dbLog.ContentSummary)
 }
 
 func TestHybrid_ResponsesInputHistoryPreservesLastUserMessage(t *testing.T) {

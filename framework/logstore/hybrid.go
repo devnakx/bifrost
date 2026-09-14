@@ -261,13 +261,8 @@ func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 
 	idx := findLastUserMessageIndex(dbEntry.InputHistoryParsed)
 
-	// Content summary: extract text from the found user message.
-	// Falls back to BuildInputContentSummary for non-chat inputs (speech, image, etc.).
-	if idx >= 0 {
-		dbEntry.ContentSummary = extractChatMessageText(&dbEntry.InputHistoryParsed[idx])
-	} else {
-		dbEntry.ContentSummary = dbEntry.BuildInputContentSummary()
-	}
+	// Content summary follows the same last-text-message rule for all request shapes.
+	dbEntry.ContentSummary = dbEntry.BuildInputContentSummary()
 	// Bound content summary to prevent large prompts from bloating the DB row.
 	dbEntry.ContentSummary = truncateTag(dbEntry.ContentSummary, maxContentSummaryBytes)
 
