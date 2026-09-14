@@ -238,6 +238,51 @@ func TestDeserializeFieldsCostBreakdownFromColumns(t *testing.T) {
 	assert.Nil(t, log.CostBreakdown.InputCostDetails)
 }
 
+// TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem 锁住预览回归：
+// Responses 首条 system/developer 指令不得污染 content_summary，SerializeFields
+// 必须优先取末条 assistant 输出，无输出时回退末条真实 user 并跳过合成注入。
+func TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem(t *testing.T) {
+	msgType := schemas.ResponsesMessageTypeMessage
+	systemRole := schemas.ResponsesInputMessageRoleSystem
+	userRole := schemas.ResponsesInputMessageRoleUser
+	assistantRole := schemas.ResponsesInputMessageRoleAssistant
+	systemText := "You are Codex, an agent based on GPT-5"
+	userText := "做一个 logo"
+	assistantText := "已生成蓝色风格 Logo"
+
+	log := &Log{
+		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{
+			{Type: &msgType, Role: &systemRole, Content: &schemas.ResponsesMessageContent{ContentStr: &systemText}},
+			{Type: &msgType, Role: &userRole, Content: &schemas.ResponsesMessageContent{ContentStr: &userText}},
+		},
+		ResponsesOutputParsed: []schemas.ResponsesMessage{
+			{Type: &msgType, Role: &assistantRole, Content: &schemas.ResponsesMessageContent{ContentStr: &assistantText}},
+		},
+	}
+	require.NoError(t, log.SerializeFields())
+	assert.Equal(t, assistantText, log.ContentSummary)
+	assert.NotContains(t, log.ContentSummary, "You are Codex")
+}
+
+// TestSerializeFieldsContentSummarySkipsSyntheticUserInput 锁住合成注入回退：
+// 无 assistant 输出时取末条真实 user，跳过 <environment_context> 等合成文本。
+func TestSerializeFieldsContentSummarySkipsSyntheticUserInput(t *testing.T) {
+	msgType := schemas.ResponsesMessageTypeMessage
+	userRole := schemas.ResponsesInputMessageRoleUser
+	synthetic := "<environment_context>codex injected context</environment_context>"
+	realUser := "补全三视图"
+
+	log := &Log{
+		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{
+			{Type: &msgType, Role: &userRole, Content: &schemas.ResponsesMessageContent{ContentStr: &synthetic}},
+			{Type: &msgType, Role: &userRole, Content: &schemas.ResponsesMessageContent{ContentStr: &realUser}},
+		},
+	}
+	require.NoError(t, log.SerializeFields())
+	assert.Equal(t, realUser, log.ContentSummary)
+	assert.NotContains(t, log.ContentSummary, "environment_context")
+}
+
 // TestDeserializeFieldsCostBreakdownNilWhenNoCost: a row with no cost gets no
 // cost_breakdown, so the field tracks the scalar cost field.
 func TestDeserializeFieldsCostBreakdownNilWhenNoCost(t *testing.T) {

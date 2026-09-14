@@ -918,10 +918,14 @@ func (l *Log) SerializeFields() error {
 		}
 	}
 
-	// Build content summary for search.
-	// Skip if already set (e.g., by the hybrid log store which builds input-only summaries).
+	// 优先构建 input-only 摘要，仅取末条 user/assistant 消息，避免 system/developer 污染预览
+	// 已有值则跳过，未命中 input-only 再回退全量摘要
 	if l.ContentSummary == "" {
-		l.ContentSummary = l.BuildContentSummary()
+		if s := l.BuildInputContentSummary(); s != "" {
+			l.ContentSummary = s
+		} else {
+			l.ContentSummary = l.BuildContentSummary()
+		}
 	}
 
 	return nil
