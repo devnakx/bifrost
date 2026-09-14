@@ -504,54 +504,54 @@ func buildMCPToolInputPreview(l *MCPToolLog) string {
 }
 
 // BuildInputContentSummary 提取用于列表预览与搜索的摘要
-// 按请求顺序优先返回最后一条带文本的 user/assistant 消息，无消息文本时回退最后一条推理摘要
+// user/assistant 文本与推理摘要三者优先级平等，按请求原始顺序返回最新一条可读消息：
+// 最后有 user 文本就显示 user，最后有 assistant 文本就显示 assistant，最后有推理摘要就显示推理摘要
 func (l *Log) BuildInputContentSummary() string {
+	// Chat 形状：输入历史 + 单条输出，输出在时间上最晚。倒序扫描，
+	// 同一条消息内正文晚于推理，先判正文再判推理。
 	if len(l.InputHistoryParsed) > 0 || l.OutputMessageParsed != nil {
 		if l.OutputMessageParsed != nil {
 			if text := extractChatMessageText(l.OutputMessageParsed); text != "" {
 				return text
 			}
+			if text := chatReasoningPreview(l.OutputMessageParsed); text != nil && *text != "" {
+				return *text
+			}
 		}
 		for i := len(l.InputHistoryParsed) - 1; i >= 0; i-- {
 			msg := &l.InputHistoryParsed[i]
-			if msg.Role != schemas.ChatMessageRoleUser && msg.Role != schemas.ChatMessageRoleAssistant {
-				continue
+			if msg.Role == schemas.ChatMessageRoleUser || msg.Role == schemas.ChatMessageRoleAssistant {
+				if text := extractChatMessageText(msg); text != "" {
+					return text
+				}
 			}
-			if text := extractChatMessageText(msg); text != "" {
-				return text
+			if text := chatReasoningPreview(msg); text != nil && *text != "" {
+				return *text
 			}
 		}
 	}
 
+	// Responses 形状：输入历史 + 输出数组，输出在时间上最晚。倒序扫描，
+	// 同一条消息内正文晚于推理，先判正文再判推理。
 	if len(l.ResponsesInputHistoryParsed) > 0 || len(l.ResponsesOutputParsed) > 0 {
 		for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
 			msg := &l.ResponsesOutputParsed[i]
-			if msg.Role == nil || (*msg.Role != schemas.ResponsesInputMessageRoleUser && *msg.Role != schemas.ResponsesInputMessageRoleAssistant) {
-				continue
+			if text := responsesReadableText(msg); text != "" {
+				return text
 			}
-			if text := extractResponsesMessageText(msg); text != "" {
+			if text := lastResponsesMessageReasoningText(msg); text != "" {
 				return text
 			}
 		}
 		for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
 			msg := &l.ResponsesInputHistoryParsed[i]
-			if msg.Role == nil || (*msg.Role != schemas.ResponsesInputMessageRoleUser && *msg.Role != schemas.ResponsesInputMessageRoleAssistant) {
-				continue
+			if text := responsesReadableText(msg); text != "" {
+				return text
 			}
-			if text := extractResponsesMessageText(msg); text != "" {
-				if *msg.Role == schemas.ResponsesInputMessageRoleUser && isSyntheticResponsesUserText(text) {
-					continue
-				}
+			if text := lastResponsesMessageReasoningText(msg); text != "" {
 				return text
 			}
 		}
-	}
-
-	if text := l.lastChatReasoningText(); text != "" {
-		return text
-	}
-	if text := l.lastResponsesReasoningText(); text != "" {
-		return text
 	}
 
 	// Speech 输入
@@ -576,32 +576,18 @@ func (l *Log) BuildInputContentSummary() string {
 	return ""
 }
 
-func (l *Log) lastChatReasoningText() string {
-	if l.OutputMessageParsed != nil {
-		if text := chatReasoningPreview(l.OutputMessageParsed); text != nil && *text != "" {
-			return *text
-		}
+func responsesReadableText(msg *schemas.ResponsesMessage) string {
+	if msg.Role != nil && *msg.Role != schemas.ResponsesInputMessageRoleUser && *msg.Role != schemas.ResponsesInputMessageRoleAssistant {
+		return ""
 	}
-	for i := len(l.InputHistoryParsed) - 1; i >= 0; i-- {
-		if text := chatReasoningPreview(&l.InputHistoryParsed[i]); text != nil && *text != "" {
-			return *text
-		}
+	text := extractResponsesMessageText(msg)
+	if text == "" {
+		return ""
 	}
-	return ""
-}
-
-func (l *Log) lastResponsesReasoningText() string {
-	for i := len(l.ResponsesOutputParsed) - 1; i >= 0; i-- {
-		if text := lastResponsesMessageReasoningText(&l.ResponsesOutputParsed[i]); text != "" {
-			return text
-		}
+	if msg.Role != nil && *msg.Role == schemas.ResponsesInputMessageRoleUser && isSyntheticResponsesUserText(text) {
+		return ""
 	}
-	for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
-		if text := lastResponsesMessageReasoningText(&l.ResponsesInputHistoryParsed[i]); text != "" {
-			return text
-		}
-	}
-	return ""
+	return text
 }
 
 func lastResponsesMessageReasoningText(msg *schemas.ResponsesMessage) string {

@@ -283,6 +283,23 @@ func TestSerializeFieldsContentSummarySkipsSyntheticUserInput(t *testing.T) {
 	assert.NotContains(t, log.ContentSummary, "environment_context")
 }
 
+// TestSerializeFieldsContentSummaryPrefersLatestReasoning 锁住三者平等取最新：
+// 输出数组中推理摘要排在 assistant 文本之后时，content_summary 必须显示推理摘要而非回退到更早的文本。
+func TestSerializeFieldsContentSummaryPrefersLatestReasoning(t *testing.T) {
+	assistantRole := schemas.ResponsesInputMessageRoleAssistant
+	assistantText := "已生成蓝色风格 Logo"
+	reasoningText := "正在检查三视图的投影关系"
+
+	log := &Log{
+		ResponsesOutputParsed: []schemas.ResponsesMessage{
+			{Type: schemas.Ptr(schemas.ResponsesMessageTypeMessage), Role: &assistantRole, Content: &schemas.ResponsesMessageContent{ContentStr: &assistantText}},
+			{Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning), ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: reasoningText}}}},
+		},
+	}
+	require.NoError(t, log.SerializeFields())
+	assert.Equal(t, reasoningText, log.ContentSummary)
+}
+
 // TestDeserializeFieldsCostBreakdownNilWhenNoCost: a row with no cost gets no
 // cost_breakdown, so the field tracks the scalar cost field.
 func TestDeserializeFieldsCostBreakdownNilWhenNoCost(t *testing.T) {

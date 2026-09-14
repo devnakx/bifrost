@@ -171,6 +171,43 @@ func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
 			},
 			want: responsesReasoning,
 		},
+		{
+			name: "later reasoning beats earlier assistant text",
+			log: Log{
+				ResponsesOutputParsed: []schemas.ResponsesMessage{
+					responsesMessage(schemas.ResponsesInputMessageRoleAssistant, responsesAssistant),
+					{
+						Type:              schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+						ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
+					},
+				},
+			},
+			want: responsesReasoning,
+		},
+		{
+			name: "later assistant text beats earlier reasoning",
+			log: Log{
+				ResponsesOutputParsed: []schemas.ResponsesMessage{
+					{
+						Type:              schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+						ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
+					},
+					responsesMessage(schemas.ResponsesInputMessageRoleAssistant, responsesAssistant),
+				},
+			},
+			want: responsesAssistant,
+		},
+		{
+			name: "later output reasoning beats earlier input user text",
+			log: Log{
+				ResponsesInputHistoryParsed: []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleUser, responsesUser)},
+				ResponsesOutputParsed: []schemas.ResponsesMessage{{
+					Type:              schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
+				}},
+			},
+			want: responsesReasoning,
+		},
 	}
 
 	for _, tt := range tests {
