@@ -1261,7 +1261,7 @@ func (l *Log) DeserializeFields() error {
 	// Hybrid log store offloads token_usage to object storage but keeps denormalized
 	// prompt/completion/total/cached columns in the DB for analytics. Rebuild the virtual
 	// field so list APIs and the UI can render tokens without hydrating from S3 —
-	// same role content_summary plays for message previews. Only the cached-read total
+	// same role list_preview plays for message previews. Only the cached-read total
 	// is denormalized; the cache-write total, the 5m/1h split, and richer details such
 	// as completion_tokens_details live solely in the offloaded payload and are restored
 	// on detail reads that hydrate from object storage.

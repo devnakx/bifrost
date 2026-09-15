@@ -504,7 +504,7 @@ func buildMCPToolInputPreview(l *MCPToolLog) string {
 	return ""
 }
 
-// BuildInputContentSummary 提取用于列表预览与搜索的摘要
+// BuildInputContentSummary 提取最新一条可读消息，作为列表预览
 // user/assistant 文本与推理摘要三者优先级平等，按请求原始顺序返回最新一条可读消息：
 // 最后有 user 文本就显示 user，最后有 assistant 文本就显示 assistant，最后有推理摘要就显示推理摘要
 func (l *Log) BuildInputContentSummary() string {

@@ -943,9 +943,9 @@ func TestHybrid_TokenUsageSummaryForListPreview(t *testing.T) {
 func TestHybrid_SpeechInputSummaryForListPreview(t *testing.T) {
 	// /audio/speech (TTS) requests carry their text in speech_input, which is
 	// offloaded to object storage and cleared from the DB row. The DB must still
-	// retain a content_summary so the log list renders the text instead of "-"
-	// (the UI uses content_summary as its display fallback once payload fields
-	// are offloaded). Same gap exists for responses/image/video inputs.
+	// retain a list_preview so the log list renders the text instead of "-"
+	// (the UI reads list_preview first and content_summary as fallback once
+	// payload fields are offloaded). Same gap exists for responses/image/video inputs.
 	hybrid, inner, _ := newTestHybrid(t)
 	defer hybrid.Close(context.Background())
 	ctx := context.Background()
@@ -965,7 +965,7 @@ func TestHybrid_SpeechInputSummaryForListPreview(t *testing.T) {
 	waitForOffload(t, inner, "speech-1")
 
 	// speech_input is offloaded to S3 and cleared from the DB row, but the
-	// content_summary fallback retains the text for the list preview.
+	// list_preview column retains the text for the list display.
 	dbLog, err := inner.FindByID(ctx, "speech-1")
 	require.NoError(t, err)
 	assert.Empty(t, dbLog.SpeechInput, "speech_input should be offloaded to object storage")

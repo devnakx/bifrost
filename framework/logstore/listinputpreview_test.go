@@ -438,6 +438,57 @@ func TestSessionProjectionCarriesListPreviewLikeList(t *testing.T) {
 	assert.Equal(t, listByID["t7-session-long-1"].ListPreview, long.ListPreview, "会话预览须与列表预览一致")
 }
 
+// TestSplitPreviewSearchRegression 固定全文与预览对照：特异词只写入首条输入，
+// content_summary 含双 transcript 全文且可被 content_search 命中，
+// 列表行 ListPreview 仅为最新单条输出且不含该特异词
+func TestSplitPreviewSearchRegression(t *testing.T) {
+	store := newProjectionTestStore(t)
+	ctx := context.Background()
+
+	probe := "zxqsplitprobe"
+	first := probe + " " + strings.Repeat("F", 4000)
+	second := "split-preview-second short"
+	answer := "split-preview-answer short"
+	entry := &Log{
+		ID:        "split-preview-search-1",
+		Timestamp: time.Now().UTC(),
+		Object:    "chat.completion",
+		Provider:  "openai",
+		Model:     "gpt-4o-mini",
+		Status:    "success",
+		InputHistoryParsed: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &first}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &second}},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: &answer},
+		},
+		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleUser, "split-preview-resp-gamma")},
+		ResponsesOutputParsed:       []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleAssistant, "split-preview-resp-delta")},
+	}
+	require.NoError(t, entry.SerializeFields())
+	require.Contains(t, entry.ContentSummary, probe, "全文列须携带首条特异词")
+	require.NotContains(t, entry.ListPreview, probe, "预览列为最新单条不得含首条特异词")
+	for _, marker := range []string{"split-preview-resp-gamma", "split-preview-resp-delta"} {
+		require.Contains(t, entry.ContentSummary, marker, "全文列须含双 transcript")
+	}
+	require.NoError(t, store.Create(ctx, entry))
+
+	hit, err := store.SearchLogs(ctx, SearchFilters{ContentSearch: probe}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hit.Logs, 1, "全文词须被 content_search 命中")
+	assert.Equal(t, "split-preview-search-1", hit.Logs[0].ID)
+
+	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, result.Logs, 1)
+	row := result.Logs[0]
+	assert.Equal(t, answer, row.ListPreview, "列表行须携带最新单条预览")
+	assert.NotContains(t, row.ListPreview, probe, "列表预览不得含首条特异词")
+	assert.Empty(t, row.ContentSummary, "列表行不得携带全文")
+}
+
 // TestListProjectionMalformedJsonRowStillReturned 畸形 JSON 行不阻断整页查询且该行正常返回
 //
 // json_valid 守卫使畸形行走 ELSE 原样透传分支；DeserializeFields 对畸形 JSON 静默置空

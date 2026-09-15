@@ -250,7 +250,7 @@ func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 	}
 
 	// Hidden entries keep no request/response content in the DB row: no summary,
-	// last-user-message preview, or exclusion-list carve-outs. Pricing metadata is
+	// list preview, or exclusion-list carve-outs. Pricing metadata is
 	// not content and remains in the log store.
 	if dbEntry.ContentHidden {
 		ClearPayload(dbEntry)

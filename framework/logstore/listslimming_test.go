@@ -15,7 +15,7 @@ import (
 // 列表响应字段收敛（T2）钉子：
 // - SearchLogs 列表路径返回的 Log 序列化 JSON 不含 responses_input_history /
 //   responses_output / content_summary 键；list_preview 截断到 512 字节
-// - GetSessionLogs 投影隔离：仍返回消息预览字段，与改动前快照语义一致
+// - GetSessionLogs 投影隔离：仍返回消息预览字段，与快照语义一致
 // - content_search 过滤基于存储列 content_summary，不受投影收敛影响
 //
 // 阈值与占位以字面量固定，不引用实现常量，保证红态可编译
@@ -50,7 +50,7 @@ func task2SessionEntry(parent, id string, summaryLen int) *Log {
 }
 
 // TestSearchLogsListFieldsSlimmed 列表路径返回的 Log 序列化 JSON 不含两个重字段键，
-// content_summary 截到 512 字节以内（sqlite 与 postgres 双方言）
+// list_preview 截到 512 字节以内（sqlite 与 postgres 双方言）
 func TestSearchLogsListFieldsSlimmed(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
