@@ -87,7 +87,8 @@
           "    } else if (j.candidates && j.candidates[0] && j.candidates[0].content) {",
           "        shape = 'gemini-generate-content';",
           "        var parts = j.candidates[0].content.parts || [];",
-          "        hasContent = parts.some(function (p) { return p && (p.text || p.functionCall || p.executableCode); });",
+          "        // Image-output models (responseModalities IMAGE) answer with inlineData parts only; the image IS the content.",
+          "        hasContent = parts.some(function (p) { return p && (p.text || p.functionCall || p.executableCode || (p.inlineData && p.inlineData.data)); });",
           "    } else if (typeof j.output_text === 'string' && j.output_text.length > 0) {",
           "        shape = 'openai-responses-output_text';",
           "        hasContent = true;",
@@ -43235,8 +43236,8 @@
       ]
     },
     {
-      "name": "31. Gemini/Vertex generationConfig.mediaResolution honored (image prompt tokens)",
-      "description": "Regression: generationConfig.mediaResolution was silently dropped in the Gemini -> Bifrost -> Gemini\nResponses conversion on the /genai generateContent path, so a Vertex/Gemini image request billed the\nmodel-default image token count regardless of MEDIA_RESOLUTION_LOW/HIGH (e.g. ~1290 instead of ~74\nprompt tokens for a 1024x1024 image). thinkingConfig survived because both conversion legs handle it;\nmediaResolution was handled by neither.\n\nFix: round mediaResolution through ExtraParams[\"media_resolution\"] in core/providers/gemini\n(convertGenerationConfigToResponsesParameters inbound + convertParamsToGenerationConfigResponses outbound).\n\nThe only external signal is usageMetadata.promptTokenCount, so each pair sends the SAME 1024x1024 image\n(folder-level prerequest sets {{mediaResImage}}) and asserts the HIGH request reports more prompt tokens\nthan the LOW request. If the field is dropped, both fall back to the same default => equal counts =>\nthe HIGH-exceeds-LOW assertion fails, independent of what the model default is. 31.1/31.2 pin the fix on\nthe GenAI route (needs only {{genaiKey}}); 31.3/31.4 pin the same invariant on Vertex (the reported\nroute) and skip cleanly if Vertex is not configured.",
+      "name": "31. Gemini/Vertex mediaResolution honored, request-level and per-part (image prompt tokens)",
+      "description": "Regression: generationConfig.mediaResolution was silently dropped in the Gemini -> Bifrost -> Gemini\nResponses conversion on the /genai generateContent path, so a Vertex/Gemini image request billed the\nmodel-default image token count regardless of MEDIA_RESOLUTION_LOW/HIGH (e.g. ~1290 instead of ~74\nprompt tokens for a 1024x1024 image). thinkingConfig survived because both conversion legs handle it;\nmediaResolution was handled by neither.\n\nFix: round mediaResolution through ExtraParams[\"media_resolution\"] in core/providers/gemini\n(convertGenerationConfigToResponsesParameters inbound + convertParamsToGenerationConfigResponses outbound).\n\nThe only external signal is usageMetadata.promptTokenCount, so each pair sends the SAME 1024x1024 image\n(folder-level prerequest sets {{mediaResImage}}) and asserts the HIGH request reports more prompt tokens\nthan the LOW request. If the field is dropped, both fall back to the same default => equal counts =>\nthe HIGH-exceeds-LOW assertion fails, independent of what the model default is. 31.1/31.2 pin the fix on\nthe GenAI route (needs only {{genaiKey}}); 31.3/31.4 pin the same invariant on Vertex (the reported\nroute) and skip cleanly if Vertex is not configured.\n\n31.5-31.9 pin the second, separate half: Google also models media resolution per Part (Vertex AI v1 Part field 12), and the per-part value overrides generationConfig for that part. Bifrost's Part type had no such field and Part.UnmarshalJSON decodes into a closed alias, so the key was discarded at parse time -- before any of the conversion work 31.1-31.4 cover. Reported against v1.6.7: an ULTRA_HIGH image billed ~21.0k prompt tokens through /genai versus ~22.1k direct, while /genai with x-model-provider: gemini and /genai_passthrough both matched Google, because those forward raw bytes instead of converting. Per-part is Gemini 3 only, so these cases hardcode gemini-3.6-flash rather than using {{genaiModel}}/{{vertexModel}}. 31.5 sends the snake_case media_resolution spelling Google's own REST reference documents; 31.6-31.9 send camelCase. 31.7 and 31.9 are the ones that pin the override semantics: generationConfig says LOW while the part says HIGH, and the part must win.\n\nThat override shape is required rather than cosmetic on the HIGH cases. Google documents Gemini 3 image tokens as low 280 / medium 560 / high 1120 / ultra_high 2240, with the unspecified default also 1120 (https://ai.google.dev/gemini-api/docs/media-resolution). Default and HIGH are therefore indistinguishable, so a bare per-part HIGH case cannot tell \"HIGH honored\" from \"field dropped\". Pinning generationConfig to LOW makes a dropped per-part field fall back to ~280 instead of ~1120, which the HIGH-exceeds-LOW assertion then catches.",
       "event": [
         {
           "listen": "prerequest",
@@ -43463,6 +43464,279 @@
                 "v1beta",
                 "models",
                 "{{vertexModel}}:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "31.5 GenAI Gemini per-part media_resolution LOW - record image prompt tokens (gemini)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('GenAI Gemini per-part media_resolution LOW request succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "var low = body && body.usageMetadata && body.usageMetadata.promptTokenCount;",
+                  "pm.test('GenAI Gemini per-part media_resolution LOW response reports usageMetadata.promptTokenCount', function () {",
+                  "  pm.expect(low, 'promptTokenCount missing: ' + pm.response.text()).to.be.a('number');",
+                  "});",
+                  "pm.collectionVariables.set('genaiPartMediaResLowPromptTokens', low);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Reply with the single word: ok.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"image/jpeg\",\n            \"data\": \"{{mediaResImage}}\"\n          },\n          \"media_resolution\": {\n            \"level\": \"MEDIA_RESOLUTION_LOW\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"maxOutputTokens\": 2048\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/gemini-3.6-flash:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "gemini-3.6-flash:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "31.6 GenAI Gemini per-part mediaResolution HIGH exceeds LOW - field not dropped (gemini)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('GenAI Gemini per-part mediaResolution HIGH request succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "var high = body && body.usageMetadata && body.usageMetadata.promptTokenCount;",
+                  "pm.test('GenAI Gemini per-part mediaResolution HIGH response reports usageMetadata.promptTokenCount', function () {",
+                  "  pm.expect(high, 'promptTokenCount missing: ' + pm.response.text()).to.be.a('number');",
+                  "});",
+                  "var low = Number(pm.collectionVariables.get('genaiPartMediaResLowPromptTokens'));",
+                  "// Only assert the invariant when the LOW case actually recorded a value (it may have skipped).",
+                  "if (!isNaN(low) && low > 0) {",
+                  "  pm.test('per-part mediaResolution honored: HIGH image prompt tokens exceed LOW', function () {",
+                  "    pm.expect(high, 'HIGH=' + high + ' must exceed LOW=' + low + '; equal counts mean the per-part field was dropped').to.be.above(low);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Reply with the single word: ok.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"image/jpeg\",\n            \"data\": \"{{mediaResImage}}\"\n          },\n          \"mediaResolution\": {\n            \"level\": \"MEDIA_RESOLUTION_HIGH\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"maxOutputTokens\": 2048\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/gemini-3.6-flash:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "gemini-3.6-flash:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "31.7 GenAI Gemini per-part mediaResolution overrides generationConfig LOW (gemini)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('GenAI Gemini per-part override request succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "var high = body && body.usageMetadata && body.usageMetadata.promptTokenCount;",
+                  "pm.test('GenAI Gemini per-part override response reports usageMetadata.promptTokenCount', function () {",
+                  "  pm.expect(high, 'promptTokenCount missing: ' + pm.response.text()).to.be.a('number');",
+                  "});",
+                  "var low = Number(pm.collectionVariables.get('genaiPartMediaResLowPromptTokens'));",
+                  "// Only assert the invariant when the LOW case actually recorded a value (it may have skipped).",
+                  "if (!isNaN(low) && low > 0) {",
+                  "  pm.test('per-part mediaResolution overrides the request-level generationConfig.mediaResolution', function () {",
+                  "    pm.expect(high, 'HIGH=' + high + ' must exceed LOW=' + low + '; equal counts mean the per-part field was dropped').to.be.above(low);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Reply with the single word: ok.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"image/jpeg\",\n            \"data\": \"{{mediaResImage}}\"\n          },\n          \"mediaResolution\": {\n            \"level\": \"MEDIA_RESOLUTION_HIGH\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"mediaResolution\": \"MEDIA_RESOLUTION_LOW\",\n    \"maxOutputTokens\": 2048\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/gemini-3.6-flash:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "gemini-3.6-flash:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "31.8 Vertex Gemini per-part media_resolution LOW - record image prompt tokens (vertex)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Vertex Gemini per-part media_resolution LOW request succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "var low = body && body.usageMetadata && body.usageMetadata.promptTokenCount;",
+                  "pm.test('Vertex Gemini per-part media_resolution LOW response reports usageMetadata.promptTokenCount', function () {",
+                  "  pm.expect(low, 'promptTokenCount missing: ' + pm.response.text()).to.be.a('number');",
+                  "});",
+                  "pm.collectionVariables.set('vertexPartMediaResLowPromptTokens', low);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Reply with the single word: ok.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"image/jpeg\",\n            \"data\": \"{{mediaResImage}}\"\n          },\n          \"media_resolution\": {\n            \"level\": \"MEDIA_RESOLUTION_LOW\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"maxOutputTokens\": 2048\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/vertex/gemini-3.6-flash:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "vertex/gemini-3.6-flash:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "31.9 Vertex Gemini per-part mediaResolution overrides generationConfig LOW (vertex)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Vertex Gemini per-part override request succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json();",
+                  "var high = body && body.usageMetadata && body.usageMetadata.promptTokenCount;",
+                  "pm.test('Vertex Gemini per-part override response reports usageMetadata.promptTokenCount', function () {",
+                  "  pm.expect(high, 'promptTokenCount missing: ' + pm.response.text()).to.be.a('number');",
+                  "});",
+                  "var low = Number(pm.collectionVariables.get('vertexPartMediaResLowPromptTokens'));",
+                  "// Only assert the invariant when the LOW case actually recorded a value (it may have skipped).",
+                  "if (!isNaN(low) && low > 0) {",
+                  "  pm.test('per-part mediaResolution overrides the request-level generationConfig.mediaResolution on Vertex', function () {",
+                  "    pm.expect(high, 'HIGH=' + high + ' must exceed LOW=' + low + '; equal counts mean the per-part field was dropped').to.be.above(low);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Reply with the single word: ok.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"image/jpeg\",\n            \"data\": \"{{mediaResImage}}\"\n          },\n          \"mediaResolution\": {\n            \"level\": \"MEDIA_RESOLUTION_HIGH\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"mediaResolution\": \"MEDIA_RESOLUTION_LOW\",\n    \"maxOutputTokens\": 2048\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/vertex/gemini-3.6-flash:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "vertex/gemini-3.6-flash:generateContent"
               ]
             }
           }
@@ -43873,7 +44147,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"gpt-5.6-sol\",\n  \"input\": [\n    {\n      \"type\": \"additional_tools\",\n      \"role\": \"developer\",\n      \"tools\": [\n        {\n          \"type\": \"custom\",\n          \"name\": \"exec\",\n          \"description\": \"Run JavaScript code to orchestrate/compose tool calls.\",\n          \"format\": {\n            \"type\": \"grammar\",\n            \"syntax\": \"lark\",\n            \"definition\": \"start: SOURCE\\nSOURCE: /[\\\\s\\\\S]+/\\n\"\n          }\n        },\n        {\n          \"type\": \"function\",\n          \"name\": \"get_weather\",\n          \"description\": \"Get the current weather for a city.\",\n          \"strict\": false,\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\",\n                \"description\": \"City name.\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ],\n            \"additionalProperties\": false\n          }\n        },\n        {\n          \"type\": \"namespace\",\n          \"name\": \"collaboration\",\n          \"description\": \"Tools for spawning and managing sub-agents.\",\n          \"tools\": [\n            {\n              \"type\": \"function\",\n              \"name\": \"spawn_agent\",\n              \"description\": \"Spawn a sub-agent for a bounded subtask.\",\n              \"strict\": false,\n              \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"task_name\": {\n                    \"type\": \"string\"\n                  }\n                },\n                \"required\": [\n                  \"task_name\"\n                ],\n                \"additionalProperties\": false\n              }\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with exactly: OK\"\n        }\n      ]\n    }\n  ],\n  \"max_output_tokens\": 64\n}"
+              "raw": "{\n  \"model\": \"gpt-5.6-sol\",\n  \"input\": [\n    {\n      \"type\": \"additional_tools\",\n      \"role\": \"developer\",\n      \"tools\": [\n        {\n          \"type\": \"custom\",\n          \"name\": \"exec\",\n          \"description\": \"Run JavaScript code to orchestrate/compose tool calls.\",\n          \"format\": {\n            \"type\": \"grammar\",\n            \"syntax\": \"lark\",\n            \"definition\": \"start: SOURCE\\nSOURCE: /[\\\\s\\\\S]+/\\n\"\n          }\n        },\n        {\n          \"type\": \"function\",\n          \"name\": \"get_weather\",\n          \"description\": \"Get the current weather for a city.\",\n          \"strict\": false,\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\",\n                \"description\": \"City name.\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ],\n            \"additionalProperties\": false\n          }\n        },\n        {\n          \"type\": \"namespace\",\n          \"name\": \"harness_agents\",\n          \"description\": \"Tools for spawning and managing sub-agents.\",\n          \"tools\": [\n            {\n              \"type\": \"function\",\n              \"name\": \"spawn_agent\",\n              \"description\": \"Spawn a sub-agent for a bounded subtask.\",\n              \"strict\": false,\n              \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"task_name\": {\n                    \"type\": \"string\"\n                  }\n                },\n                \"required\": [\n                  \"task_name\"\n                ],\n                \"additionalProperties\": false\n              }\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with exactly: OK\"\n        }\n      ]\n    }\n  ],\n  \"max_output_tokens\": 64\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/openai/v1/responses",
@@ -134574,7 +134848,7 @@
           }
         },
         {
-          "name": "vertex/gemini-2.5-pro /anthropic/v1/messages trailing assistant prefill is trimmed - #6334",
+          "name": "vertex/gemini-3.7-flash /anthropic/v1/messages trailing assistant prefill is trimmed - #6334",
           "event": [
             {
               "listen": "test",
@@ -134619,7 +134893,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"vertex/gemini-2.5-pro\",\n  \"max_tokens\": 64,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What is 2+2? Answer with just the number.\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"The answer is\"\n    }\n  ]\n}"
+              "raw": "{\n  \"model\": \"vertex/gemini-3.7-flash\",\n  \"max_tokens\": 64,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What is 2+2? Answer with just the number.\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"The answer is\"\n    }\n  ]\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/anthropic/v1/messages",
@@ -143802,7 +144076,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n  \"input\": \"A farmer has 17 sheep and all but 9 run away. Think it through step by step, then answer.\",\n  \"reasoning\": {\n    \"effort\": \"medium\",\n    \"summary\": \"auto\"\n  },\n  \"max_output_tokens\": 1024,\n  \"stream\": true\n}",
+              "raw": "{\n  \"model\": \"bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n  \"input\": \"A farmer has 17 sheep and all but 9 run away. Think it through step by step, then answer.\",\n  \"reasoning\": {\n    \"effort\": \"medium\",\n    \"summary\": \"auto\"\n  },\n  \"max_output_tokens\": 2048,\n  \"stream\": true\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -143886,7 +144160,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n  \"input\": \"A farmer has 17 sheep and all but 9 run away. Think it through step by step, then answer.\",\n  \"reasoning\": {\n    \"effort\": \"medium\",\n    \"summary\": \"auto\"\n  },\n  \"max_output_tokens\": 1024,\n  \"stream\": true\n}",
+              "raw": "{\n  \"model\": \"bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n  \"input\": \"A farmer has 17 sheep and all but 9 run away. Think it through step by step, then answer.\",\n  \"reasoning\": {\n    \"effort\": \"medium\",\n    \"summary\": \"auto\"\n  },\n  \"max_output_tokens\": 2048,\n  \"stream\": true\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -147344,7 +147618,7 @@
                   "  pm.expect(usage.prompt_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
                   "  pm.expect(usage.completion_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
                   "  pm.expect(usage.total_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
-                  "  pm.expect(usageIndex, 'usage chunk must arrive after the finish_reason chunk (finish=' + finishIndex + ', usage=' + usageIndex + ')').to.be.above(finishIndex);",
+                  "  pm.expect(usageIndex, 'usage must ride the finish_reason chunk or a later one (finish=' + finishIndex + ', usage=' + usageIndex + ')').to.be.at.least(finishIndex);",
             "  pm.expect(doneIndex, 'expected exactly one [DONE] frame after the usage chunk (usage=' + usageIndex + ', done=' + doneIndex + ')').to.be.above(usageIndex);",
             "  pm.expect(seen, '[DONE] must be the last frame; frames after it are invisible to clients (done=' + doneIndex + ', frames=' + seen + ')').to.equal(doneIndex);",
                   "});"
@@ -147418,7 +147692,7 @@
                   "  pm.expect(usage.prompt_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
                   "  pm.expect(usage.completion_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
                   "  pm.expect(usage.total_tokens, 'usage: ' + JSON.stringify(usage)).to.be.above(0);",
-                  "  pm.expect(usageIndex, 'usage chunk must arrive after the finish_reason chunk (finish=' + finishIndex + ', usage=' + usageIndex + ')').to.be.above(finishIndex);",
+                  "  pm.expect(usageIndex, 'usage must ride the finish_reason chunk or a later one (finish=' + finishIndex + ', usage=' + usageIndex + ')').to.be.at.least(finishIndex);",
             "  pm.expect(doneIndex, 'expected exactly one [DONE] frame after the usage chunk (usage=' + usageIndex + ', done=' + doneIndex + ')').to.be.above(usageIndex);",
             "  pm.expect(seen, '[DONE] must be the last frame; frames after it are invisible to clients (done=' + doneIndex + ', frames=' + seen + ')').to.equal(doneIndex);",
                   "});"
@@ -147669,7 +147943,16 @@
                   "  pm.expect(text, 'expected a terminal response.completed event').to.include('response.completed');",
                   "  pm.expect(text, 'expected the function_call to carry the bare name').to.include('\"name\":\"ping\"');",
                   "  pm.expect(text, 'expected the function_call to carry its namespace').to.include('\"namespace\":\"namespace_b\"');",
-                  "  pm.expect(text, 'the flattened alias leaked to the client').to.not.include('namespace_b__ping');",
+                  "  // extra_fields echoes the upstream wire, where the alias is expected",
+                  "  var clientText = text.split('\\n').map(function (line) {",
+                  "    if (line.indexOf('data: ') !== 0) { return line; }",
+                  "    var ev;",
+                  "    try { ev = JSON.parse(line.slice(6)); } catch (e) { return line; }",
+                  "    delete ev.extra_fields;",
+                  "    if (ev.response) { delete ev.response.extra_fields; }",
+                  "    return 'data: ' + JSON.stringify(ev);",
+                  "  }).join('\\n');",
+                  "  pm.expect(clientText, 'the flattened alias leaked to the client').to.not.include('namespace_b__ping');",
                   "});"
                 ]
               }
@@ -147757,7 +148040,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"openai/gpt-5-mini\",\n  \"input\": \"Test the tools\",\n  \"max_output_tokens\": 64,\n  \"tools\": [\n    {\n      \"type\": \"namespace\",\n      \"name\": \"namespace_a\",\n      \"tools\": [\n        {\n          \"type\": \"function\",\n          \"name\": \"js\",\n          \"description\": \"Run JavaScript in namespace A\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {},\n            \"additionalProperties\": false\n          }\n        }\n      ]\n    },\n    {\n      \"type\": \"namespace\",\n      \"name\": \"namespace_b\",\n      \"tools\": [\n        {\n          \"type\": \"function\",\n          \"name\": \"js\",\n          \"description\": \"Run JavaScript in namespace B\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {},\n            \"additionalProperties\": false\n          }\n        }\n      ]\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"openai/gpt-5-mini\",\n  \"input\": \"Test the tools\",\n  \"max_output_tokens\": 512,\n  \"reasoning\": {\n    \"effort\": \"minimal\"\n  },\n  \"tools\": [\n    {\n      \"type\": \"namespace\",\n      \"name\": \"namespace_a\",\n      \"description\": \"Tools in namespace A\",\n      \"tools\": [\n        {\n          \"type\": \"function\",\n          \"name\": \"js\",\n          \"description\": \"Run JavaScript in namespace A\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {},\n            \"additionalProperties\": false\n          }\n        }\n      ]\n    },\n    {\n      \"type\": \"namespace\",\n      \"name\": \"namespace_b\",\n      \"description\": \"Tools in namespace B\",\n      \"tools\": [\n        {\n          \"type\": \"function\",\n          \"name\": \"js\",\n          \"description\": \"Run JavaScript in namespace B\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {},\n            \"additionalProperties\": false\n          }\n        }\n      ]\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -148156,15 +148439,15 @@
                   "var tools = rr.tools || [];",
                   "pm.test('deepseek v4-flash, 64-char wire: both nested functions reach the wire as distinct tools', function () {",
                   "  pm.expect(tools.length, 'expected two outbound tools: ' + JSON.stringify(rr).slice(0, 400)).to.equal(2);",
-                  "  pm.expect(tools[0].name, 'the two flattened names must stay distinct').to.not.equal(tools[1].name);",
+                  "  pm.expect(tools[0].function.name, 'the two flattened names must stay distinct').to.not.equal(tools[1].function.name);",
                   "});",
                   "pm.test('deepseek v4-flash: names honour the 64-char OpenAI-compatible contract via the hashed form - namespace-alias-length', function () {",
                   "  for (var i = 0; i < tools.length; i++) {",
-                  "    var name = tools[i].name || '';",
+                  "    var name = (tools[i].function || {}).name || '';",
                   "    pm.expect(name, 'tool[' + i + '] name ' + JSON.stringify(name) + ' (len ' + name.length + ') breaks the 64-char contract').to.match(/^[A-Za-z0-9_-]{1,64}$/);",
                   "    pm.expect(name, 'a 98-char alias must take the <8-hex hash>_<function> form on a 64-char wire').to.match(/^[0-9a-f]{8}_/);",
                   "  }",
-                  "  pm.expect(tools[0].name, 'the function name must stay readable after the hash prefix').to.include('read_repository_file');",
+                  "  pm.expect(tools[0].function.name, 'the function name must stay readable after the hash prefix').to.include('read_repository_file');",
                   "});"
                 ]
               }
@@ -149264,6 +149547,1523 @@
             },
             "description": "Pins has_more false on overflow (offset>total) and self-heals id if needed; complements the stitch check in the prior item."
           }
+        }
+      ]
+    },
+    {
+      "name": "86. DeepSeek max_tokens cap dropped on OpenAI-compatible wire (#5606) (deepseek-max-tokens-cap)",
+      "description": "Issue #5606: Bifrost collapses an inbound max_tokens into ChatParameters.MaxCompletionTokens at the transport, then the OpenAI egress converter emits it as max_completion_tokens. DeepSeek's OpenAI-compatible /chat/completions reads only the legacy max_tokens spelling and ignores unknown fields silently, so the output cap was dropped with no error at any layer - reported at 266-289x the requested cap (4629 tokens returned for max_tokens:16) with finish_reason 'stop'. The fix renames the field back to max_tokens in the DeepSeek case of ToOpenAIChatRequest, alongside the existing OpenCode/Ollama/Mistral cases. These rows pin the cap as observable behaviour rather than as a wire-field name: a honored cap truncates an essay prompt at 16 tokens and reports finish_reason 'length'. Pre-fix all three fail with finish_reason 'stop' and thousands of completion tokens. max_tokens is exactly 16 so Bifrost's MinMaxCompletionTokens clamp is a no-op and cannot mask the result. Content is deliberately not asserted: DeepSeek thinks by default, so a 16-token cap can legitimately truncate inside reasoning and leave content empty.",
+      "item": [
+        {
+          "name": "deepseek/deepseek-v4-flash /v1/chat/completions honors max_tokens cap - #5606",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('deepseek native route max_tokens: 2xx - #5606', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "pm.test('deepseek native route max_tokens: max_tokens cap honored (finish_reason=length) - #5606', function () {",
+                  "  var j = pm.response.json();",
+                  "  pm.expect(j.choices, 'expected a choices array: ' + pm.response.text()).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(j.choices[0].finish_reason, 'max_tokens:16 was not honored - DeepSeek reads the legacy max_tokens field and silently ignores max_completion_tokens, so a renamed field lets generation run uncapped: ' + pm.response.text()).to.eql('length');",
+                  "});",
+                  "pm.test('deepseek native route max_tokens: completion_tokens stays near the cap - #5606', function () {",
+                  "  var u = pm.response.json().usage || {};",
+                  "  pm.expect(u.completion_tokens, 'no usage.completion_tokens in reply: ' + pm.response.text()).to.be.a('number');",
+                  "  pm.expect(u.completion_tokens, 'requested max_tokens:16 but got ' + u.completion_tokens + ' completion tokens - the output cap was dropped in translation (#5606)').to.be.at.most(64);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"deepseek/deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a detailed 800 word essay about the history of the Eiffel Tower, covering its design, construction and reception.\"}],\"max_tokens\":16}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          }
+        },
+        {
+          "name": "deepseek/deepseek-v4-flash /v1/chat/completions streaming honors max_tokens cap - #5606",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('deepseek native route streaming max_tokens: 2xx - #5606', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var finishReason = null;",
+                  "var completionTokens = null;",
+                  "pm.response.text().split('\\n').forEach(function (line) {",
+                  "  if (line.indexOf('data:') !== 0) { return; }",
+                  "  var payload = line.slice(5).trim();",
+                  "  if (!payload || payload === '[DONE]') { return; }",
+                  "  var chunk;",
+                  "  try { chunk = JSON.parse(payload); } catch (e) { return; }",
+                  "  if (chunk.usage && typeof chunk.usage.completion_tokens === 'number') { completionTokens = chunk.usage.completion_tokens; }",
+                  "  var choice = chunk.choices && chunk.choices[0];",
+                  "  if (choice && choice.finish_reason) { finishReason = choice.finish_reason; }",
+                  "});",
+                  "pm.test('deepseek native route streaming max_tokens: stream terminates with finish_reason=length - #5606', function () {",
+                  "  pm.expect(finishReason, 'max_tokens:16 was not honored on the stream - generation ran uncapped and stopped on its own (#5606): ' + pm.response.text()).to.eql('length');",
+                  "});",
+                  "pm.test('deepseek native route streaming max_tokens: streamed completion_tokens stays near the cap - #5606', function () {",
+                  "  pm.expect(completionTokens, 'no usage chunk despite stream_options.include_usage: ' + pm.response.text()).to.be.a('number');",
+                  "  pm.expect(completionTokens, 'requested max_tokens:16 but streamed ' + completionTokens + ' completion tokens - the output cap was dropped in translation (#5606)').to.be.at.most(64);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"deepseek/deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a detailed 800 word essay about the history of the Eiffel Tower, covering its design, construction and reception.\"}],\"max_tokens\":16,\"stream\":true,\"stream_options\":{\"include_usage\":true}}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          }
+        },
+        {
+          "name": "deepseek/deepseek-v4-flash /openai drop-in honors max_tokens cap - #5606",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('deepseek /openai drop-in max_tokens: 2xx - #5606', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "pm.test('deepseek /openai drop-in max_tokens: max_tokens cap honored (finish_reason=length) - #5606', function () {",
+                  "  var j = pm.response.json();",
+                  "  pm.expect(j.choices, 'expected a choices array: ' + pm.response.text()).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(j.choices[0].finish_reason, 'max_tokens:16 was not honored - DeepSeek reads the legacy max_tokens field and silently ignores max_completion_tokens, so a renamed field lets generation run uncapped: ' + pm.response.text()).to.eql('length');",
+                  "});",
+                  "pm.test('deepseek /openai drop-in max_tokens: completion_tokens stays near the cap - #5606', function () {",
+                  "  var u = pm.response.json().usage || {};",
+                  "  pm.expect(u.completion_tokens, 'no usage.completion_tokens in reply: ' + pm.response.text()).to.be.a('number');",
+                  "  pm.expect(u.completion_tokens, 'requested max_tokens:16 but got ' + u.completion_tokens + ' completion tokens - the output cap was dropped in translation (#5606)').to.be.at.most(64);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"deepseek/deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a detailed 800 word essay about the history of the Eiffel Tower, covering its design, construction and reception.\"}],\"max_tokens\":16}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/openai/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "openai",
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "87. Anthropic ingress non-streaming truncation reports stop_reason max_tokens (#6782)",
+      "description": "Pins that a non-streaming turn cut short by the output-token cap reports stop_reason max_tokens on /anthropic/v1/messages, not end_turn.\n\nBug (#6782): OpenAI-shaped Responses providers (Azure /openai/v1/responses, OpenAI, and every chat-completions provider whose finish_reason \"length\" becomes status incomplete via responsesStatusFromChatFinishReason in core/schemas/mux.go) never send stop_reason; the truncation lives only in incomplete_details.reason. ToAnthropicResponsesResponse in core/providers/anthropic/responses.go read only StopReason and defaulted to end_turn, so a 4096-token truncated reply on Azure Fireworks Foundry models was reported as a clean finish. Folder 65 pins the streaming twin (#6081, fixed in #6805); this folder pins the non-streaming encoder.\n\nThe Azure half of #6782 (Fireworks Foundry deployments routed to /openai/v1/chat/completions when their datasheet row lists no /v1/responses endpoint) cannot be pinned here: the harness Azure account has no Fireworks deployment and the gate depends on datasheet rows shipped separately. It is covered by TestAzureResponsesHonoursDatasheetSupportedEndpoints in core/providers/azure/azure_test.go.",
+      "item": [
+        {
+          "name": "openai/gpt-4o-mini /anthropic/v1/messages non-streaming truncated by max_tokens reports stop_reason max_tokens - #6782",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('openai chat via anthropic ingress: non-streaming truncation reports stop_reason max_tokens, not end_turn - #6782', function () {",
+                  "  var raw = pm.response.text() || '';",
+                  "  pm.expect(pm.response.code, 'failed: ' + raw.slice(0, 400)).to.be.below(400);",
+                  "  var j; try { j = pm.response.json(); } catch (e) {",
+                  "    pm.expect.fail('response was not JSON: ' + raw.slice(0, 300)); return; }",
+                  "  pm.expect(j.usage && j.usage.output_tokens, 'usage.output_tokens must be reported: ' + raw.slice(0, 300)).to.be.above(0);",
+                  "  pm.expect(j.stop_reason, 'a turn cut by max_tokens=16 must not be reported as a clean finish: ' + raw.slice(0, 300)).to.equal('max_tokens');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-version",
+                "value": "2023-06-01"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"openai/gpt-4o-mini\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Count from 1 to 1000, one number per line.\"}]}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "88. Bedrock Converse images inside tool results for OpenAI and xAI models (converse-tool-result-images)",
+      "description": "AWS Converse rejects an image inside a toolResult for the OpenAI and xAI families (gpt-5.6, gpt-6-astra, grok-4.6) with 400 \"This model doesn't support the image field for user messages\", although the same image is accepted at the top level of a user message and gpt-5.6 reads it nested on the Responses API. Screenshot and browser tools return exactly that shape, so each such agent turn failed.\n\nhoistToolResultImages runs in both Converse converters (chat and Responses). It moves each image out of its toolResult to follow the last toolResult in the same user message, keeping result order, and leaves the fixed text \"Image attached below.\" in a toolResult it emptied, because an empty toolResult is its own 400. It is gated on supports_converse_tool_result_images, falling back to the OpenAI and xAI families; Claude, Nova and Llama 4 keep the nested shape (Llama 4 rejects the moved layout).\n\nCases pin: the Claude Code shape on the Anthropic route (placeholder text, and the model actually reading the moved image), parallel results on chat completions (all toolResults first, images in result order), the Responses converter, streaming, the xAI fallback branch, and a Claude control that must stay nested. All use the plain bedrock provider, so every request goes to Converse.",
+      "item": [
+        {
+          "name": "bedrock/global.openai.gpt-5.6-sol /anthropic/v1/messages image-only tool_result with cache_control moves out of toolResult - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-version",
+                "value": "2023-06-01"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.openai.gpt-5.6-sol\",\"max_tokens\":2048,\"tools\":[{\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of the current screen\",\"input_schema\":{\"type\":\"object\",\"properties\":{}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Call get_screenshot, then reply with only the dominant colour of the screenshot.\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_screenshot_1\",\"name\":\"get_screenshot\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_screenshot_1\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}}],\"cache_control\":{\"type\":\"ephemeral\"}}]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "function lastUserBlocks(j) {",
+                  "  var msgs = ((j.extra_fields || {}).raw_request || {}).messages || [];",
+                  "  for (var i = msgs.length - 1; i >= 0; i--) {",
+                  "    if (msgs[i].role === 'user') { return (msgs[i].content || []).filter(function (b) { return !b.cachePoint; }); }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "function label(b) {",
+                  "  if (b.toolResult) { return 'toolResult[' + (b.toolResult.content || []).map(label).join(', ') + ']'; }",
+                  "  if (b.image) { return 'image'; }",
+                  "  if (typeof b.text === 'string') { return 'text'; }",
+                  "  return Object.keys(b).join('+');",
+                  "}",
+                  "// Converse layout after the fix: every toolResult first, image-free but never empty, then the moved images.",
+                  "function expectMoved(blocks, count) {",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = 0, images = 0, lastResult = -1, firstImage = -1;",
+                  "  blocks.forEach(function (b, i) {",
+                  "    if (b.toolResult) {",
+                  "      results++; lastResult = i;",
+                  "      var inner = b.toolResult.content || [];",
+                  "      pm.expect(inner.filter(function (c) { return c.image; }).length, 'image still nested in a toolResult: ' + layout).to.equal(0);",
+                  "      pm.expect(inner.filter(function (c) { return typeof c.text === 'string' && c.text !== ''; }).length, 'emptied toolResult has no text left behind (Converse 400s an empty one): ' + layout).to.be.above(0);",
+                  "    }",
+                  "    if (b.image) { images++; if (firstImage === -1) { firstImage = i; } }",
+                  "  });",
+                  "  pm.expect(results, 'toolResult count: ' + layout).to.equal(count);",
+                  "  pm.expect(images, 'moved image count: ' + layout).to.equal(count);",
+                  "  pm.expect(firstImage, 'images must follow every toolResult: ' + layout).to.be.above(lastResult);",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "",
+                  "pm.test('bedrock global.openai.gpt-5.6-sol: image-only tool_result reaches Converse beside its toolResult - converse-tool-result-images', function () {",
+                  "  pm.expect(body, 'image left inside toolResult - the pre-fix Converse 400').to.not.include(\"doesn't support the image field\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + body).to.be.below(400);",
+                  "  var blocks = lastUserBlocks(pm.response.json());",
+                  "  expectMoved(blocks, 1);",
+                  "  var result = blocks.filter(function (b) { return b.toolResult; })[0].toolResult;",
+                  "  // Fixed text, so the rewritten turn is byte-identical every time and implicit prefix caching still hits.",
+                  "  pm.expect(result.content[0].text, 'placeholder left in the emptied toolResult').to.equal('Image attached below.');",
+                  "});",
+                  "pm.test('bedrock global.openai.gpt-5.6-sol: model reads the moved image - converse-tool-result-images', function () {",
+                  "  if (pm.response.code >= 400) { return; }",
+                  "  var text = (pm.response.json().content || []).filter(function (c) { return c.type === 'text'; }).map(function (c) { return c.text; }).join(' ');",
+                  "  pm.expect(text.toLowerCase(), 'answer does not name the red screenshot: ' + text).to.include('red');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.openai.gpt-5.6-sol /v1/chat/completions parallel tool images follow both toolResults in result order - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.openai.gpt-5.6-sol\",\"max_tokens\":2048,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of one window\",\"parameters\":{\"type\":\"object\",\"properties\":{\"window\":{\"type\":\"string\"}},\"required\":[\"window\"]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Screenshot the left and right windows in parallel, then reply exactly as: left=<colour>, right=<colour>\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_left\",\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"arguments\":\"{\\\"window\\\":\\\"left\\\"}\"}},{\"id\":\"call_right\",\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"arguments\":\"{\\\"window\\\":\\\"right\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_left\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_right\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAe0lEQVR4nO3PUQkAIBTAwBfCEPbPYxhD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLXjsAm3EgQAbtio+AAAAAElFTkSuQmCC\"}}]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "function lastUserBlocks(j) {",
+                  "  var msgs = ((j.extra_fields || {}).raw_request || {}).messages || [];",
+                  "  for (var i = msgs.length - 1; i >= 0; i--) {",
+                  "    if (msgs[i].role === 'user') { return (msgs[i].content || []).filter(function (b) { return !b.cachePoint; }); }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "function label(b) {",
+                  "  if (b.toolResult) { return 'toolResult[' + (b.toolResult.content || []).map(label).join(', ') + ']'; }",
+                  "  if (b.image) { return 'image'; }",
+                  "  if (typeof b.text === 'string') { return 'text'; }",
+                  "  return Object.keys(b).join('+');",
+                  "}",
+                  "// Converse layout after the fix: every toolResult first, image-free but never empty, then the moved images.",
+                  "function expectMoved(blocks, count) {",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = 0, images = 0, lastResult = -1, firstImage = -1;",
+                  "  blocks.forEach(function (b, i) {",
+                  "    if (b.toolResult) {",
+                  "      results++; lastResult = i;",
+                  "      var inner = b.toolResult.content || [];",
+                  "      pm.expect(inner.filter(function (c) { return c.image; }).length, 'image still nested in a toolResult: ' + layout).to.equal(0);",
+                  "      pm.expect(inner.filter(function (c) { return typeof c.text === 'string' && c.text !== ''; }).length, 'emptied toolResult has no text left behind (Converse 400s an empty one): ' + layout).to.be.above(0);",
+                  "    }",
+                  "    if (b.image) { images++; if (firstImage === -1) { firstImage = i; } }",
+                  "  });",
+                  "  pm.expect(results, 'toolResult count: ' + layout).to.equal(count);",
+                  "  pm.expect(images, 'moved image count: ' + layout).to.equal(count);",
+                  "  pm.expect(firstImage, 'images must follow every toolResult: ' + layout).to.be.above(lastResult);",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "",
+                  "pm.test('bedrock global.openai.gpt-5.6-sol: both toolResults come first and the images follow in result order - converse-tool-result-images', function () {",
+                  "  pm.expect(body, 'image left inside toolResult - the pre-fix Converse 400').to.not.include(\"doesn't support the image field\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + body).to.be.below(400);",
+                  "  var blocks = lastUserBlocks(pm.response.json());",
+                  "  expectMoved(blocks, 2);",
+                  "  var ids = blocks.filter(function (b) { return b.toolResult; }).map(function (b) { return b.toolResult.toolUseId; });",
+                  "  pm.expect(ids, 'toolResult order').to.eql(['call_left', 'call_right']);",
+                  "  // gpt-5.6 pairs the Nth image with the Nth tool call, so the moved images must keep result order.",
+                  "  var sent = JSON.parse((pm.request.body && pm.request.body.raw) || '{}').messages",
+                  "    .filter(function (m) { return m.role === 'tool'; })",
+                  "    .map(function (m) { return m.content[0].image_url.url.split('base64,')[1]; });",
+                  "  var wire = blocks.filter(function (b) { return b.image; }).map(function (b) { return (b.image.source || {}).bytes; });",
+                  "  pm.expect(wire.length, 'moved image count').to.equal(sent.length);",
+                  "  pm.expect(wire[0] === sent[0] && wire[1] === sent[1], 'moved images are not in tool result order (left red, then right blue)').to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.openai.gpt-5.6-sol /v1/responses function_call_output image moves out of toolResult - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.openai.gpt-5.6-sol\",\"max_output_tokens\":2048,\"tools\":[{\"type\":\"function\",\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of the current screen\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}],\"input\":[{\"role\":\"user\",\"content\":\"Call get_screenshot, then reply with only the dominant colour of the screenshot.\"},{\"type\":\"function_call\",\"call_id\":\"call_screenshot_1\",\"name\":\"get_screenshot\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_screenshot_1\",\"output\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "function lastUserBlocks(j) {",
+                  "  var msgs = ((j.extra_fields || {}).raw_request || {}).messages || [];",
+                  "  for (var i = msgs.length - 1; i >= 0; i--) {",
+                  "    if (msgs[i].role === 'user') { return (msgs[i].content || []).filter(function (b) { return !b.cachePoint; }); }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "function label(b) {",
+                  "  if (b.toolResult) { return 'toolResult[' + (b.toolResult.content || []).map(label).join(', ') + ']'; }",
+                  "  if (b.image) { return 'image'; }",
+                  "  if (typeof b.text === 'string') { return 'text'; }",
+                  "  return Object.keys(b).join('+');",
+                  "}",
+                  "// Converse layout after the fix: every toolResult first, image-free but never empty, then the moved images.",
+                  "function expectMoved(blocks, count) {",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = 0, images = 0, lastResult = -1, firstImage = -1;",
+                  "  blocks.forEach(function (b, i) {",
+                  "    if (b.toolResult) {",
+                  "      results++; lastResult = i;",
+                  "      var inner = b.toolResult.content || [];",
+                  "      pm.expect(inner.filter(function (c) { return c.image; }).length, 'image still nested in a toolResult: ' + layout).to.equal(0);",
+                  "      pm.expect(inner.filter(function (c) { return typeof c.text === 'string' && c.text !== ''; }).length, 'emptied toolResult has no text left behind (Converse 400s an empty one): ' + layout).to.be.above(0);",
+                  "    }",
+                  "    if (b.image) { images++; if (firstImage === -1) { firstImage = i; } }",
+                  "  });",
+                  "  pm.expect(results, 'toolResult count: ' + layout).to.equal(count);",
+                  "  pm.expect(images, 'moved image count: ' + layout).to.equal(count);",
+                  "  pm.expect(firstImage, 'images must follow every toolResult: ' + layout).to.be.above(lastResult);",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "",
+                  "pm.test('bedrock global.openai.gpt-5.6-sol: Responses converter moves the function_call_output image beside its toolResult - converse-tool-result-images', function () {",
+                  "  pm.expect(body, 'image left inside toolResult - the pre-fix Converse 400').to.not.include(\"doesn't support the image field\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + body).to.be.below(400);",
+                  "  expectMoved(lastUserBlocks(pm.response.json()), 1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.openai.gpt-5.6-sol /v1/chat/completions streaming tool image moves out of toolResult - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.openai.gpt-5.6-sol\",\"max_tokens\":2048,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of the current screen\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Call get_screenshot, then reply with only the dominant colour of the screenshot.\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_screenshot_1\",\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_screenshot_1\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}}]}],\"stream\":true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('bedrock global.openai.gpt-5.6-sol: streaming tool image completes with an answer - converse-tool-result-images', function () {",
+                  "  pm.expect(body, 'image left inside toolResult - the pre-fix Converse 400').to.not.include(\"doesn't support the image field\");",
+                  "  pm.expect(pm.response.code, 'stream request failed: ' + body.slice(0, 600)).to.equal(200);",
+                  "  pm.expect(body, 'expected the [DONE] terminator').to.include('data: [DONE]');",
+                  "  var content = '', errors = [];",
+                  "  body.split('\\n').forEach(function (line) {",
+                  "    if (line.indexOf('data: ') !== 0 || line === 'data: [DONE]') { return; }",
+                  "    var chunk;",
+                  "    try { chunk = JSON.parse(line.slice(6)); } catch (e) { return; }",
+                  "    if (chunk.error) { errors.push(JSON.stringify(chunk.error)); }",
+                  "    (chunk.choices || []).forEach(function (c) { if (c.delta && typeof c.delta.content === 'string') { content += c.delta.content; } });",
+                  "  });",
+                  "  pm.expect(errors, 'error frames in the stream').to.eql([]);",
+                  "  pm.expect(content.trim(), 'stream carried no answer text').to.not.equal('');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.xai.grok-4.6 /v1/chat/completions tool image moves out of toolResult - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.xai.grok-4.6\",\"max_tokens\":2048,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of the current screen\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Call get_screenshot, then reply with only the dominant colour of the screenshot.\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_screenshot_1\",\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_screenshot_1\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}}]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "function lastUserBlocks(j) {",
+                  "  var msgs = ((j.extra_fields || {}).raw_request || {}).messages || [];",
+                  "  for (var i = msgs.length - 1; i >= 0; i--) {",
+                  "    if (msgs[i].role === 'user') { return (msgs[i].content || []).filter(function (b) { return !b.cachePoint; }); }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "function label(b) {",
+                  "  if (b.toolResult) { return 'toolResult[' + (b.toolResult.content || []).map(label).join(', ') + ']'; }",
+                  "  if (b.image) { return 'image'; }",
+                  "  if (typeof b.text === 'string') { return 'text'; }",
+                  "  return Object.keys(b).join('+');",
+                  "}",
+                  "// Converse layout after the fix: every toolResult first, image-free but never empty, then the moved images.",
+                  "function expectMoved(blocks, count) {",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = 0, images = 0, lastResult = -1, firstImage = -1;",
+                  "  blocks.forEach(function (b, i) {",
+                  "    if (b.toolResult) {",
+                  "      results++; lastResult = i;",
+                  "      var inner = b.toolResult.content || [];",
+                  "      pm.expect(inner.filter(function (c) { return c.image; }).length, 'image still nested in a toolResult: ' + layout).to.equal(0);",
+                  "      pm.expect(inner.filter(function (c) { return typeof c.text === 'string' && c.text !== ''; }).length, 'emptied toolResult has no text left behind (Converse 400s an empty one): ' + layout).to.be.above(0);",
+                  "    }",
+                  "    if (b.image) { images++; if (firstImage === -1) { firstImage = i; } }",
+                  "  });",
+                  "  pm.expect(results, 'toolResult count: ' + layout).to.equal(count);",
+                  "  pm.expect(images, 'moved image count: ' + layout).to.equal(count);",
+                  "  pm.expect(firstImage, 'images must follow every toolResult: ' + layout).to.be.above(lastResult);",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "",
+                  "pm.test('bedrock global.xai.grok-4.6: xAI fallback moves the tool image beside its toolResult - converse-tool-result-images', function () {",
+                  "  pm.expect(body, 'image left inside toolResult - the pre-fix Converse 400').to.not.include(\"doesn't support the image field\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + body).to.be.below(400);",
+                  "  expectMoved(lastUserBlocks(pm.response.json()), 1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/{{bedrockModel}} /v1/chat/completions Claude keeps the image inside toolResult - converse-tool-result-images",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/{{bedrockModel}}\",\"max_tokens\":2048,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"description\":\"Returns a screenshot of the current screen\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"messages\":[{\"role\":\"user\",\"content\":\"Call get_screenshot, then reply with only the dominant colour of the screenshot.\"},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_screenshot_1\",\"type\":\"function\",\"function\":{\"name\":\"get_screenshot\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_screenshot_1\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==\"}}]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.text() || '';",
+                  "function lastUserBlocks(j) {",
+                  "  var msgs = ((j.extra_fields || {}).raw_request || {}).messages || [];",
+                  "  for (var i = msgs.length - 1; i >= 0; i--) {",
+                  "    if (msgs[i].role === 'user') { return (msgs[i].content || []).filter(function (b) { return !b.cachePoint; }); }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "function label(b) {",
+                  "  if (b.toolResult) { return 'toolResult[' + (b.toolResult.content || []).map(label).join(', ') + ']'; }",
+                  "  if (b.image) { return 'image'; }",
+                  "  if (typeof b.text === 'string') { return 'text'; }",
+                  "  return Object.keys(b).join('+');",
+                  "}",
+                  "// Converse layout after the fix: every toolResult first, image-free but never empty, then the moved images.",
+                  "function expectMoved(blocks, count) {",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = 0, images = 0, lastResult = -1, firstImage = -1;",
+                  "  blocks.forEach(function (b, i) {",
+                  "    if (b.toolResult) {",
+                  "      results++; lastResult = i;",
+                  "      var inner = b.toolResult.content || [];",
+                  "      pm.expect(inner.filter(function (c) { return c.image; }).length, 'image still nested in a toolResult: ' + layout).to.equal(0);",
+                  "      pm.expect(inner.filter(function (c) { return typeof c.text === 'string' && c.text !== ''; }).length, 'emptied toolResult has no text left behind (Converse 400s an empty one): ' + layout).to.be.above(0);",
+                  "    }",
+                  "    if (b.image) { images++; if (firstImage === -1) { firstImage = i; } }",
+                  "  });",
+                  "  pm.expect(results, 'toolResult count: ' + layout).to.equal(count);",
+                  "  pm.expect(images, 'moved image count: ' + layout).to.equal(count);",
+                  "  pm.expect(firstImage, 'images must follow every toolResult: ' + layout).to.be.above(lastResult);",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "",
+                  "pm.test('bedrock {{bedrockModel}}: Claude reads images inside a toolResult, so the request stays nested - converse-tool-result-images', function () {",
+                  "  pm.expect(pm.response.code, 'request failed: ' + body).to.be.below(400);",
+                  "  var blocks = lastUserBlocks(pm.response.json());",
+                  "  pm.expect(blocks, 'raw_request missing - is send_back_raw_request honoured?').to.be.an('array');",
+                  "  var layout = blocks.map(label).join(' | ');",
+                  "  var results = blocks.filter(function (b) { return b.toolResult; });",
+                  "  pm.expect(results.length, 'toolResult count: ' + layout).to.equal(1);",
+                  "  var inner = results[0].toolResult.content || [];",
+                  "  pm.expect(inner.filter(function (c) { return c.image; }).length, 'image was moved out for Claude: ' + layout).to.equal(1);",
+                  "  pm.expect(blocks.filter(function (b) { return b.image; }).length, 'unexpected image beside the toolResult: ' + layout).to.equal(0);",
+                  "  pm.expect(inner.filter(function (c) { return c.text === 'Image attached below.'; }).length, 'placeholder added for Claude: ' + layout).to.equal(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "89. GenAI generateContent image requests: inline image at any part position + imageConfig aspectRatio passthrough (genai-image-generate-content)",
+      "description": "Two silent-success defects on native Gemini image requests sent through the /genai route to Vertex. Both returned HTTP 200 with a well-formed image that ignored part of the request.\n\n1. Image edit detection only inspected contents[0].parts[0]. With responseModalities IMAGE and the prompt text before the inlineData image, isImageEditRequest returned false, the request was classified as image generation, and ToBifrostImageGenerationRequest kept only the first text part. The image never reached Vertex (0 IMAGE prompt tokens) and the model invented a picture from the prompt alone. Google accepts inlineData at any position; its own Gemini API REST edit sample is text-first.\n\n2. imageConfig.aspectRatio was folded into a WxH size string by convertImagenFormatToSize, which only knows 1:1, 3:4, 4:3, 9:16 and 16:9 and defaults to square. ToGeminiImageGenerationRequest / ToGeminiImageEditRequest then derived 1:1 back from that size, so 3:2, 2:3, 21:9 and every other Gemini ratio was forwarded as 1:1. The fix copies aspectRatio into the typed aspect_ratio param, which both outbound converters now prefer over the size-derived ratio.\n\nCases: (A) text-first [text, inlineData] asserts IMAGE prompt tokens > 0; (B) text-to-image with aspectRatio 3:2 at 2K asserts the returned image decodes to a ~3:2 width/height; (C) image-first edit with a square input and aspectRatio 3:2 asserts the same on the edit path. B and C skip when the model answers without an image. There is no streaming variant: Vertex ImageGenerationStream is unsupported.",
+      "item": [
+        {
+          "name": "vertex/gemini-3-pro-image /genai generateContent text-first inline image reaches the model (IMAGE prompt tokens) - genai-image-generate-content",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('generateContent succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "pm.test('inline image placed after the text part reaches the model (IMAGE prompt tokens reported)', function () {",
+                  "  var details = (body.usageMetadata || {}).promptTokensDetails || [];",
+                  "  var imageTokens = 0;",
+                  "  details.forEach(function (d) { if (d.modality === 'IMAGE') { imageTokens = d.tokenCount || 0; } });",
+                  "  pm.expect(imageTokens, 'IMAGE prompt tokens were 0, so the image was dropped: ' + JSON.stringify(body.usageMetadata)).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"Keep the shapes exactly; change only the red area to black.\"\n        },\n        {\n          \"inlineData\": {\n            \"mimeType\": \"image/png\",\n            \"data\": \"iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAC4UlEQVR42u3TUQ2AMBAFwSo5JfgPIvACFviDdGfzFLQ365bCLU8gACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgJQBcM3YhwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJgJ83x/lmHgqA4t2TAIDTxwAAp48BAK6fAQBcPwMAuH4GAHD9DADg+hkAwPUzAIDrZwAAAAAAIHz9DAAAAAAAhK+fAQAAAAAAAARA8/oZAAAAAAAAQAAAIAAAEAAACAAABAAAAgAAAQCAAABAAAAgAAAQADsY8BEAACAAABAANQO+AAAABEDSgMcHAAABkDTg2QHoGvDgAHQNeGoAugY8MgBdA54XgK4BDwtA14AnBSDKwDMCEGXg6QAoSvBQAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAAgACQAJAAkACQAJAAkACQAJAAkAaaMeP9aRD9RMIIwAAAAASUVORK5CYII=\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseModalities\": [\n      \"IMAGE\"\n    ]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/vertex/gemini-3-pro-image:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "vertex/gemini-3-pro-image:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "vertex/gemini-3-pro-image /genai generateContent imageConfig aspectRatio 3:2 returns a 3:2 image - genai-image-generate-content",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('generateContent succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "var parts = (((body.candidates || [])[0] || {}).content || {}).parts || [];",
+                  "var image = parts.filter(function (p) { return p.inlineData && p.inlineData.data; })[0];",
+                  "if (!image) {",
+                  "  // Gemini image generation occasionally answers without an image; that is model behavior,",
+                  "  // not the gateway defect this case pins, so only assert when an image came back.",
+                  "  return;",
+                  "}",
+                  "// Sniff PNG/JPEG from the bytes: the /genai image response labels every image image/png.",
+                  "function imageDimensions(b64) {",
+                  "  var buf = Buffer.from(b64.slice(0, 400000), 'base64');",
+                  "  if (buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) {",
+                  "    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };",
+                  "  }",
+                  "  if (buf[0] === 0xFF && buf[1] === 0xD8) {",
+                  "    var i = 2;",
+                  "    while (i + 9 < buf.length) {",
+                  "      if (buf[i] !== 0xFF) { i++; continue; }",
+                  "      var marker = buf[i + 1];",
+                  "      if (marker === 0xFF) { i++; continue; }",
+                  "      if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD9)) { i += 2; continue; }",
+                  "      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {",
+                  "        return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };",
+                  "      }",
+                  "      i += 2 + buf.readUInt16BE(i + 2);",
+                  "    }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "var dims = imageDimensions(image.inlineData.data);",
+                  "pm.test('generation imageConfig.aspectRatio 3:2 is honored as 3:2, not collapsed to 1:1', function () {",
+                  "  pm.expect(dims, 'could not read image dimensions (mimeType ' + image.inlineData.mimeType + ')').to.be.an('object');",
+                  "  var ratio = dims.w / dims.h;",
+                  "  pm.expect(ratio, 'expected a 3:2 image, got ' + dims.w + 'x' + dims.h).to.be.within(1.4, 1.6);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"A simple flat illustration of a red apple on a plain white background.\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseModalities\": [\n      \"IMAGE\"\n    ],\n    \"imageConfig\": {\n      \"aspectRatio\": \"3:2\",\n      \"imageSize\": \"2K\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/vertex/gemini-3-pro-image:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "vertex/gemini-3-pro-image:generateContent"
+              ]
+            }
+          }
+        },
+        {
+          "name": "vertex/gemini-3-pro-image /genai generateContent image edit imageConfig aspectRatio 3:2 returns a 3:2 image - genai-image-generate-content",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('generateContent succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "var parts = (((body.candidates || [])[0] || {}).content || {}).parts || [];",
+                  "var image = parts.filter(function (p) { return p.inlineData && p.inlineData.data; })[0];",
+                  "if (!image) {",
+                  "  // Gemini image generation occasionally answers without an image; that is model behavior,",
+                  "  // not the gateway defect this case pins, so only assert when an image came back.",
+                  "  return;",
+                  "}",
+                  "// Sniff PNG/JPEG from the bytes: the /genai image response labels every image image/png.",
+                  "function imageDimensions(b64) {",
+                  "  var buf = Buffer.from(b64.slice(0, 400000), 'base64');",
+                  "  if (buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) {",
+                  "    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };",
+                  "  }",
+                  "  if (buf[0] === 0xFF && buf[1] === 0xD8) {",
+                  "    var i = 2;",
+                  "    while (i + 9 < buf.length) {",
+                  "      if (buf[i] !== 0xFF) { i++; continue; }",
+                  "      var marker = buf[i + 1];",
+                  "      if (marker === 0xFF) { i++; continue; }",
+                  "      if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD9)) { i += 2; continue; }",
+                  "      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {",
+                  "        return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };",
+                  "      }",
+                  "      i += 2 + buf.readUInt16BE(i + 2);",
+                  "    }",
+                  "  }",
+                  "  return null;",
+                  "}",
+                  "var dims = imageDimensions(image.inlineData.data);",
+                  "pm.test('edit imageConfig.aspectRatio 3:2 is honored as 3:2, not collapsed to 1:1', function () {",
+                  "  pm.expect(dims, 'could not read image dimensions (mimeType ' + image.inlineData.mimeType + ')').to.be.an('object');",
+                  "  var ratio = dims.w / dims.h;",
+                  "  pm.expect(ratio, 'expected a 3:2 image, got ' + dims.w + 'x' + dims.h).to.be.within(1.4, 1.6);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"inlineData\": {\n            \"mimeType\": \"image/png\",\n            \"data\": \"iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAC4UlEQVR42u3TUQ2AMBAFwSo5JfgPIvACFviDdGfzFLQ365bCLU8gACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgJQBcM3YhwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJAAkACQAJgJ83x/lmHgqA4t2TAIDTxwAAp48BAK6fAQBcPwMAuH4GAHD9DADg+hkAwPUzAIDrZwAAAAAAIHz9DAAAAAAAhK+fAQAAAAAAAARA8/oZAAAAAAAAQAAAIAAAEAAACAAABAAAAgAAAQCAAABAAAAgAAAQADsY8BEAACAAABAANQO+AAAABEDSgMcHAAABkDTg2QHoGvDgAHQNeGoAugY8MgBdA54XgK4BDwtA14AnBSDKwDMCEGXg6QAoSvBQAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAEgASABIAAgACQAJAAkACQAJAAkACQAJAAkAaaMeP9aRD9RMIIwAAAAASUVORK5CYII=\"\n          }\n        },\n        {\n          \"text\": \"Keep the shapes exactly; change only the red area to black.\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseModalities\": [\n      \"IMAGE\"\n    ],\n    \"imageConfig\": {\n      \"aspectRatio\": \"3:2\",\n      \"imageSize\": \"2K\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/vertex/gemini-3-pro-image:generateContent",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "vertex/gemini-3-pro-image:generateContent"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "90. Codex embedded local MCP tools across providers (codex-local-mcp-hoist)",
+      "description": "Codex declares local MCP functions inside additional_tools input items. On namespace-incompatible provider wires these declarations must be promoted before namespace flattening, so Anthropic receives callable schemas and the caller receives its original namespace/name. Both cases force the embedded function: before the fix the tool declaration is missing. Streaming also checks completed output-item events and terminal response restoration. Tools execute locally in the client; these fixtures do not connect to an MCP server.",
+      "item": [
+        {
+          "name": "90.1 anthropic/claude-sonnet-4-5 codex-local-mcp-hoist non-stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"anthropic/claude-sonnet-4-5\",\n  \"input\": [\n    {\n      \"type\": \"additional_tools\",\n      \"role\": \"developer\",\n      \"tools\": [\n        {\n          \"type\": \"namespace\",\n          \"name\": \"mcp__local\",\n          \"description\": \"Tools executed by the caller's local MCP server.\",\n          \"tools\": [\n            {\n              \"type\": \"function\",\n              \"name\": \"read\",\n              \"description\": \"Read a local note.\",\n              \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"path\": {\n                    \"type\": \"string\"\n                  }\n                },\n                \"required\": [\n                  \"path\"\n                ],\n                \"additionalProperties\": false\n              }\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"user\",\n      \"content\": \"Use the read tool to read note.txt.\"\n    }\n  ],\n  \"tool_choice\": {\n    \"type\": \"function\",\n    \"name\": \"read\"\n  },\n  \"max_output_tokens\": 256,\n  \"stream\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/openai/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "openai",
+                "v1",
+                "responses"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('codex-local-mcp-hoist: request succeeded', function () {",
+                  "  pm.expect(pm.response.code, pm.response.text()).to.equal(200);",
+                  "});",
+                  "var calls = (pm.response.json().output || []).filter(function (item) { return item.type === 'function_call'; });",
+                  "pm.test('codex-local-mcp-hoist: local call identity and arguments survive', function () {",
+                  "  pm.expect(calls.length, pm.response.text()).to.be.above(0);",
+                  "  calls.forEach(function (call) {",
+                  "    pm.expect(call.name).to.equal('read');",
+                  "    pm.expect(call.namespace).to.equal('mcp__local');",
+                  "    pm.expect(call.call_id).to.be.a('string').and.not.empty;",
+                  "    pm.expect(JSON.parse(call.arguments).path).to.equal('note.txt');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "90.2 anthropic/claude-sonnet-4-5 codex-local-mcp-hoist stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"anthropic/claude-sonnet-4-5\",\n  \"input\": [\n    {\n      \"type\": \"additional_tools\",\n      \"role\": \"developer\",\n      \"tools\": [\n        {\n          \"type\": \"namespace\",\n          \"name\": \"mcp__local\",\n          \"description\": \"Tools executed by the caller's local MCP server.\",\n          \"tools\": [\n            {\n              \"type\": \"function\",\n              \"name\": \"read\",\n              \"description\": \"Read a local note.\",\n              \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                  \"path\": {\n                    \"type\": \"string\"\n                  }\n                },\n                \"required\": [\n                  \"path\"\n                ],\n                \"additionalProperties\": false\n              }\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"user\",\n      \"content\": \"Use the read tool to read note.txt.\"\n    }\n  ],\n  \"tool_choice\": {\n    \"type\": \"function\",\n    \"name\": \"read\"\n  },\n  \"max_output_tokens\": 256,\n  \"stream\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/openai/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "openai",
+                "v1",
+                "responses"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('codex-local-mcp-hoist: request succeeded', function () {",
+                  "  pm.expect(pm.response.code, pm.response.text()).to.equal(200);",
+                  "});",
+                  "var events = [];",
+                  "pm.response.text().split(/\\r?\\n/).forEach(function (line) {",
+                  "  if (line.indexOf('data:') !== 0) { return; }",
+                  "  var raw = line.slice(5).trim();",
+                  "  if (!raw || raw === '[DONE]') { return; }",
+                  "  events.push(JSON.parse(raw));",
+                  "});",
+                  "var calls = events.filter(function (event) { return event.type === 'response.output_item.done' && event.item && event.item.type === 'function_call'; }).map(function (event) { return event.item; });",
+                  "var completed = events.filter(function (event) { return event.type === 'response.completed'; });",
+                  "pm.test('codex-local-mcp-hoist: stream completed with a local call', function () {",
+                  "  pm.expect(completed.length, pm.response.text()).to.equal(1);",
+                  "  pm.expect(calls.length, pm.response.text()).to.be.above(0);",
+                  "});",
+                  "completed.forEach(function (event) { calls = calls.concat((event.response.output || []).filter(function (item) { return item.type === 'function_call'; })); });",
+                  "pm.test('codex-local-mcp-hoist: local call identity and arguments survive', function () {",
+                  "  pm.expect(calls.length, pm.response.text()).to.be.above(0);",
+                  "  calls.forEach(function (call) {",
+                  "    pm.expect(call.name).to.equal('read');",
+                  "    pm.expect(call.namespace).to.equal('mcp__local');",
+                  "    pm.expect(call.call_id).to.be.a('string').and.not.empty;",
+                  "    pm.expect(JSON.parse(call.arguments).path).to.equal('note.txt');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "91. Streaming raw_response retains every provider SSE frame (#7144) (raw-stream-frames)",
+      "description": "Issue #7144: with send_back_raw_response enabled, the OpenAI-compatible chat streaming\nloop attached ExtraFields.RawResponse only inside the branch that forwards chunks\ncarrying content/reasoning/audio/tool calls. Role-only, finish-only and usage-only\nframes are documented parts of an OpenAI stream, but none of them reaches that branch,\nso their bytes were discarded before framework/streaming could reconstruct\nraw_response - which it does purely by concatenating chunk.RawResponse. The usage-only\nframe is the provider's authoritative token count and is what Bifrost bills from, so\nthe captured audit trail could not be reconciled against a provider invoice.\n\nThe mirror defect lived on the Responses-over-Chat fallback, where one upstream chat\nframe spreads into several Responses events and each was stamped with the same payload,\nmaking a single frame appear N times.\n\n91.1 pins the usage-only frame surviving on the direct chat path, and that Bifrost still\nreports normalized usage (proving the frame is read, not merely recorded).\n91.2 pins the finish-only frame surviving, captured exactly once.\n91.3 pins the fallback path no longer duplicating frames.\n\nThe refusal/annotation forwarding fix from the same change is not pinned here: a live\nmodel cannot be reliably made to emit delta.refusal, so it is covered by the Go tests\nTestChatStreamForwardsRefusalOnlyDelta / TestChatStreamForwardsAnnotationOnlyDelta.",
+      "item": [
+        {
+          "name": "91.1 openai/gpt-4o-mini /v1/chat/completions streaming - raw_response retains the usage-only frame - #7144",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// #7144: raw capture used to live inside the branch that forwards content-bearing",
+                  "// chunks, so the final usage-only frame (choices: [], the provider's authoritative",
+                  "// token counts) was read and billed from but never recorded. Bifrost defaults",
+                  "// stream_options.include_usage, so this frame is guaranteed on the wire.",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('91.1 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Collect the captured raw frames from every SSE event Bifrost emitted.",
+                  "// raw_response is a string of upstream `data:` payloads joined by a blank line",
+                  "// (see docs/providers/supported-providers/overview.mdx, 'Streaming responses').",
+                  "var rawFrames = [], normalizedTotal = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens) { normalizedTotal = j.usage.total_tokens; }",
+                  "  if (j.response && j.response.usage && j.response.usage.total_tokens) { normalizedTotal = j.response.usage.total_tokens; }",
+                  "  var ef = j.extra_fields || {};",
+                  "  var rr = ef.raw_response;",
+                  "  if (rr === undefined || rr === null) { return; }",
+                  "  if (typeof rr !== 'string') { rr = JSON.stringify(rr); }",
+                  "  rr.split('\\n\\n').forEach(function (f) { if (f.trim().length) { rawFrames.push(f.trim()); } });",
+                  "});",
+                  "var parsedFrames = [];",
+                  "rawFrames.forEach(function (f) { try { parsedFrames.push(JSON.parse(f)); } catch (e) {} });",
+                  "var usageOnly = parsedFrames.filter(function (j) { return j.choices && j.choices.length === 0 && j.usage && j.usage.prompt_tokens > 0; });",
+                  "var finishFrames = parsedFrames.filter(function (j) { return j.choices && j.choices.length > 0 && j.choices[0].finish_reason; });",
+                  "var dbg = ' | frames=' + rawFrames.length + ' parsed=' + parsedFrames.length + ' sample=' + rawFrames.join(' ~~ ').slice(0, 1200);",
+                  "pm.test('91.1 raw_response contains the provider usage-only frame', function () {",
+                  "  pm.expect(usageOnly.length, 'no frame with choices:[] and usage.prompt_tokens found' + dbg).to.be.above(0);",
+                  "});",
+                  "pm.test('91.1 normalized usage is still reported (the frame was read, not just recorded)', function () {",
+                  "  pm.expect(normalizedTotal, 'expected a non-zero normalized total_tokens' + dbg).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4o-mini\",\n  \"stream\": true,\n  \"max_tokens\": 48,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "91.2 openai/gpt-4o-mini /v1/chat/completions streaming - raw_response retains the finish-only frame exactly once - #7144",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// #7144: a chunk whose delta is {} and which carries finish_reason is how OpenAI",
+                  "// ends a completion. It never entered the content-forwarding branch, so its bytes",
+                  "// vanished. The exactly-once assertions also guard the opposite failure - capturing",
+                  "// a frame more than once - which is the shape the Responses fallback had (case 91.3).",
+                  "// Only frames that are unique by construction are counted: two identical content",
+                  "// deltas can legitimately repeat on the wire, a finish or usage frame cannot.",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('91.2 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Collect the captured raw frames from every SSE event Bifrost emitted.",
+                  "// raw_response is a string of upstream `data:` payloads joined by a blank line",
+                  "// (see docs/providers/supported-providers/overview.mdx, 'Streaming responses').",
+                  "var rawFrames = [], normalizedTotal = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens) { normalizedTotal = j.usage.total_tokens; }",
+                  "  if (j.response && j.response.usage && j.response.usage.total_tokens) { normalizedTotal = j.response.usage.total_tokens; }",
+                  "  var ef = j.extra_fields || {};",
+                  "  var rr = ef.raw_response;",
+                  "  if (rr === undefined || rr === null) { return; }",
+                  "  if (typeof rr !== 'string') { rr = JSON.stringify(rr); }",
+                  "  rr.split('\\n\\n').forEach(function (f) { if (f.trim().length) { rawFrames.push(f.trim()); } });",
+                  "});",
+                  "var parsedFrames = [];",
+                  "rawFrames.forEach(function (f) { try { parsedFrames.push(JSON.parse(f)); } catch (e) {} });",
+                  "var usageOnly = parsedFrames.filter(function (j) { return j.choices && j.choices.length === 0 && j.usage && j.usage.prompt_tokens > 0; });",
+                  "var finishFrames = parsedFrames.filter(function (j) { return j.choices && j.choices.length > 0 && j.choices[0].finish_reason; });",
+                  "var dbg = ' | frames=' + rawFrames.length + ' parsed=' + parsedFrames.length + ' sample=' + rawFrames.join(' ~~ ').slice(0, 1200);",
+                  "pm.test('91.2 raw_response contains a finish_reason frame', function () {",
+                  "  pm.expect(finishFrames.length, 'no frame carrying finish_reason found' + dbg).to.be.above(0);",
+                  "});",
+                  "pm.test('91.2 the finish_reason frame is captured exactly once', function () {",
+                  "  pm.expect(finishFrames.length, 'finish_reason frame captured ' + finishFrames.length + ' times' + dbg).to.eql(1);",
+                  "});",
+                  "pm.test('91.2 the usage-only frame is captured exactly once', function () {",
+                  "  pm.expect(usageOnly.length, 'usage-only frame captured ' + usageOnly.length + ' times' + dbg).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4o-mini\",\n  \"stream\": true,\n  \"max_tokens\": 48,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "91.3 deepseek/deepseek-v4-flash /v1/responses streaming - Responses-over-Chat fallback does not duplicate raw frames - #7144",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// On the Responses-over-Chat fallback one upstream chat frame is spread into several",
+                  "// Responses events, and every one of them used to be stamped with the same payload -",
+                  "// so the reconstructed raw_response reported a single frame N times (measured: the",
+                  "// finish frame 4x). DeepSeek takes this fallback unconditionally on the",
+                  "// OpenAI-compatible path (core/providers/deepseek/deepseek.go:387).",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('91.3 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Collect the captured raw frames from every SSE event Bifrost emitted.",
+                  "// raw_response is a string of upstream `data:` payloads joined by a blank line",
+                  "// (see docs/providers/supported-providers/overview.mdx, 'Streaming responses').",
+                  "var rawFrames = [], normalizedTotal = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens) { normalizedTotal = j.usage.total_tokens; }",
+                  "  if (j.response && j.response.usage && j.response.usage.total_tokens) { normalizedTotal = j.response.usage.total_tokens; }",
+                  "  var ef = j.extra_fields || {};",
+                  "  var rr = ef.raw_response;",
+                  "  if (rr === undefined || rr === null) { return; }",
+                  "  if (typeof rr !== 'string') { rr = JSON.stringify(rr); }",
+                  "  rr.split('\\n\\n').forEach(function (f) { if (f.trim().length) { rawFrames.push(f.trim()); } });",
+                  "});",
+                  "var parsedFrames = [];",
+                  "rawFrames.forEach(function (f) { try { parsedFrames.push(JSON.parse(f)); } catch (e) {} });",
+                  "var usageOnly = parsedFrames.filter(function (j) { return j.choices && j.choices.length === 0 && j.usage && j.usage.prompt_tokens > 0; });",
+                  "var finishFrames = parsedFrames.filter(function (j) { return j.choices && j.choices.length > 0 && j.choices[0].finish_reason; });",
+                  "var dbg = ' | frames=' + rawFrames.length + ' parsed=' + parsedFrames.length + ' sample=' + rawFrames.join(' ~~ ').slice(0, 1200);",
+                  "pm.test('91.3 the finish_reason frame is not duplicated across spread events', function () {",
+                  "  pm.expect(finishFrames.length, 'finish_reason frame captured ' + finishFrames.length + ' times; expected at most once' + dbg).to.be.below(2);",
+                  "});",
+                  "pm.test('91.3 the usage-only frame is not duplicated across spread events', function () {",
+                  "  pm.expect(usageOnly.length, 'usage-only frame captured ' + usageOnly.length + ' times; expected at most once' + dbg).to.be.below(2);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"deepseek/deepseek-v4-flash\",\n  \"stream\": true,\n  \"max_output_tokens\": 48,\n  \"input\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "92. Custom provider does_not_send_done_marker keeps trailing usage with wait_for_usage (#7143) (done-marker-usage)",
+      "description": "Issue #7143: custom_provider_config.does_not_send_done_marker ended the OpenAI-compatible\nread loop the instant a non-empty finish_reason arrived. OpenAI sends the usage-only frame\nAFTER that frame and before [DONE] (see folder 91), so the loop never read it and the\nsynthesized terminal chunk carried a zero-valued usage object - logging, pricing,\nvirtual-key usage, budgets and cost attribution all recorded the request at zero tokens\nand zero cost.\n\nNo fixture upstream is needed: the flag is a declaration about the upstream, not a\ndescription of it, so pointing a custom provider carrying the flag at real OpenAI\nreproduces the loss exactly. openai_dnsdm and openai_dnsdm_wait are registered in\ntests/integrations/python/config.json for these three items.\n\n92.1 is the regression guard. 92.2 pins the documented default so it cannot change\nsilently for operators who did not opt in. 92.3 is the unconfigured control that makes\n92.2 read as a deliberate difference rather than a broken fixture.",
+      "item": [
+        {
+          "name": "92.1 openai_dnsdm_wait/gpt-4o-mini /v1/chat/completions streaming - wait_for_usage keeps the trailing usage chunk - #7143",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The fix for #7143: with wait_for_usage the loop keeps reading past finish_reason",
+                  "// until the usage frame lands, so the request is billable.",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('92.1 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Bifrost normalizes the upstream usage-only frame onto the terminal chunk it emits,",
+                  "// so the client-visible total is the number logging, pricing, virtual-key usage and",
+                  "// budgets all read. Scan every SSE event for the highest total_tokens reported.",
+                  "var total = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens > total) { total = j.usage.total_tokens; }",
+                  "});",
+                  "pm.test('92.1 trailing usage survived the finish_reason break', function () {",
+                  "  pm.expect(total, 'expected a non-zero total_tokens; 0 means the read loop stopped at finish_reason and dropped the usage frame').to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai_dnsdm_wait/gpt-4o-mini\",\n  \"stream\": true,\n  \"max_tokens\": 48,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "92.2 openai_dnsdm/gpt-4o-mini /v1/chat/completions streaming - does_not_send_done_marker alone still drops usage (documented default) - #7143",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Unchanged behaviour, pinned deliberately. does_not_send_done_marker on its own still",
+                  "// breaks at finish_reason and discards the usage frame; that is documented in",
+                  "// docs/providers/custom-providers.mdx. This guards against changing it by accident.",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('92.2 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Bifrost normalizes the upstream usage-only frame onto the terminal chunk it emits,",
+                  "// so the client-visible total is the number logging, pricing, virtual-key usage and",
+                  "// budgets all read. Scan every SSE event for the highest total_tokens reported.",
+                  "var total = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens > total) { total = j.usage.total_tokens; }",
+                  "});",
+                  "pm.test('92.2 opt-in without wait_for_usage stops before the usage frame', function () {",
+                  "  pm.expect(total, 'expected total_tokens 0: does_not_send_done_marker alone must keep breaking on finish_reason').to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai_dnsdm/gpt-4o-mini\",\n  \"stream\": true,\n  \"max_tokens\": 48,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "92.3 openai/gpt-4o-mini /v1/chat/completions streaming - unconfigured control reports usage normally - #7143",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Control: the same request on the plain provider, which waits for [DONE]. Proves 92.2's",
+                  "// zero is the opt-in's behaviour and not a broken request or an upstream change.",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('92.3 streaming request succeeded', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "// Bifrost normalizes the upstream usage-only frame onto the terminal chunk it emits,",
+                  "// so the client-visible total is the number logging, pricing, virtual-key usage and",
+                  "// budgets all read. Scan every SSE event for the highest total_tokens reported.",
+                  "var total = 0;",
+                  "(pm.response.text() || '').split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data: ') !== 0) { return; }",
+                  "  var p = l.slice(6).trim();",
+                  "  if (p === '[DONE]' || !p.length) { return; }",
+                  "  var j; try { j = JSON.parse(p); } catch (e) { return; }",
+                  "  if (j.usage && j.usage.total_tokens > total) { total = j.usage.total_tokens; }",
+                  "});",
+                  "pm.test('92.3 control reports usage without any custom provider config', function () {",
+                  "  pm.expect(total, 'expected a non-zero total_tokens from the plain provider').to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4o-mini\",\n  \"stream\": true,\n  \"max_tokens\": 48,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one short sentence.\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     }

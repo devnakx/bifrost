@@ -115,7 +115,8 @@
             "claude-sonnet-4-6",
             "claude-opus-4-8",
             "moonshotai/kimi-k2-thinking-maas",
-            "minimaxai/minimax-m2-maas"
+            "minimaxai/minimax-m2-maas",
+            "gemini-3.6-flash"
           ]
         },
         {
@@ -132,6 +133,16 @@
             "moonshotai/kimi-k2-thinking-maas",
             "minimaxai/minimax-m2-maas"
           ]
+        },
+        {
+          "name": "Vertex Global (Gemini 3)",
+          "vertex_key_config": {
+            "project_id": "env.VERTEX_PROJECT_ID",
+            "region": "global",
+            "auth_credentials": "env.VERTEX_CREDENTIALS"
+          },
+          "weight": 1,
+          "models": ["gemini-3.6-flash"]
         }
       ],
       "network_config": {
@@ -540,6 +551,49 @@
       },
       "network_config": {
         "default_request_timeout_in_seconds": 300
+      }
+    },
+    "openai_dnsdm": {
+      "keys": [
+        {
+          "name": "OpenAI API Key",
+          "value": "env.OPENAI_API_KEY",
+          "weight": 1,
+          "models": [
+            "*"
+          ]
+        }
+      ],
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "is_key_less": false,
+        "does_not_send_done_marker": true
+      },
+      "network_config": {
+        "default_request_timeout_in_seconds": 300,
+        "stream_idle_timeout_in_seconds": 15
+      }
+    },
+    "openai_dnsdm_wait": {
+      "keys": [
+        {
+          "name": "OpenAI API Key",
+          "value": "env.OPENAI_API_KEY",
+          "weight": 1,
+          "models": [
+            "*"
+          ]
+        }
+      ],
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "is_key_less": false,
+        "does_not_send_done_marker": true,
+        "wait_for_usage": true
+      },
+      "network_config": {
+        "default_request_timeout_in_seconds": 300,
+        "stream_idle_timeout_in_seconds": 15
       }
     },
     "openai_pc_auto": {
