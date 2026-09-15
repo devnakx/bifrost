@@ -15,7 +15,8 @@ import (
 // 列表投影输入预览上限的行为钉子：超大单条 chat 输入消息在 SQL 读取阶段被替换为
 // 保留原 role 的最小合法占位消息；详情接口 FindByID 保持全量；realtime.turn 行豁免；
 // 列表投影已不下发 responses_input_history/responses_output，session 投影独立保留
-// 两列预览并继承同一上限
+// 两列预览并继承同一上限；列表行携带 list_preview（最新一条，截断 512），
+// 全量可搜索文本保留在存储列 content_summary，由 content_search 直接过滤，不进入投影
 //
 // 占位文本在此以字面量固定而不引用实现常量，保证红态（常量尚未落地）可编译
 const expectedOversizedPreview = "[preview omitted: message too large]"
@@ -315,6 +316,126 @@ func TestListPreview_EmptyFallbackToFullSummary(t *testing.T) {
 	require.NoError(t, entry.SerializeFields())
 	assert.Contains(t, entry.ContentSummary, "split-fallback-zeta")
 	assert.Equal(t, "split-fallback-zeta", entry.ListPreview)
+}
+
+// TestListProjectionCarriesListPreviewNotFullText 列表行携带最新一条预览而不带全文：
+// 首条超长输入只存在于存储列，全文词仍可被 content_search 命中，列表行 ListPreview
+// 为最新输出且不超过 512 字节，ContentSummary 不进入投影
+func TestListProjectionCarriesListPreviewNotFullText(t *testing.T) {
+	store := newProjectionTestStore(t)
+	ctx := context.Background()
+
+	first := "t6fullmarker " + strings.Repeat("L", 4000)
+	second := "t6second short"
+	answer := "t6answer short"
+	entry := &Log{
+		ID:        "list-preview-dual-1",
+		Timestamp: time.Now().UTC(),
+		Object:    "chat.completion",
+		Provider:  "openai",
+		Model:     "gpt-4o-mini",
+		Status:    "success",
+		InputHistoryParsed: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &first}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &second}},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: &answer},
+		},
+	}
+	require.NoError(t, entry.SerializeFields())
+	require.Greater(t, len(entry.ContentSummary), 512, "种子全文须超过截断阈值")
+	require.NoError(t, store.Create(ctx, entry))
+
+	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, result.Logs, 1)
+	row := result.Logs[0]
+
+	assert.Equal(t, answer, row.ListPreview, "列表行须携带最新一条预览")
+	assert.LessOrEqual(t, len(row.ListPreview), 512, "预览须截断到 512 字节以内")
+	assert.Empty(t, row.ContentSummary, "列表行不得携带全文")
+
+	hit, err := store.SearchLogs(ctx, SearchFilters{ContentSearch: "t6fullmarker"}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hit.Logs, 1, "全文词仍须被 content_search 命中")
+	assert.Equal(t, "list-preview-dual-1", hit.Logs[0].ID)
+}
+
+// TestSessionProjectionCarriesListPreviewLikeList 会话行与列表行预览一致：
+// 短预览原样下发且全文不出投影，长预览截断到 512 字节以内
+func TestSessionProjectionCarriesListPreviewLikeList(t *testing.T) {
+	store := newProjectionTestStore(t)
+	ctx := context.Background()
+
+	parent := "t7-session-preview-parent"
+	answer := "t7answer short"
+	first := "t7fullmarker " + strings.Repeat("L", 4000)
+	second := "t7second short"
+	shortEntry := &Log{
+		ID:              "t7-session-short-1",
+		ParentRequestID: &parent,
+		Timestamp:       time.Now().UTC(),
+		Object:          "chat.completion",
+		Provider:        "openai",
+		Model:           "gpt-4o-mini",
+		Status:          "success",
+		InputHistoryParsed: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &first}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &second}},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: &answer},
+		},
+	}
+	require.NoError(t, shortEntry.SerializeFields())
+	require.Greater(t, len(shortEntry.ContentSummary), 512, "种子全文须超过截断阈值")
+	require.NoError(t, store.Create(ctx, shortEntry))
+
+	longAnswer := strings.Repeat("W", 2000)
+	longEntry := &Log{
+		ID:              "t7-session-long-1",
+		ParentRequestID: &parent,
+		Timestamp:       time.Now().UTC().Add(time.Second),
+		Object:          "chat.completion",
+		Provider:        "openai",
+		Model:           "gpt-4o-mini",
+		Status:          "success",
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: &longAnswer},
+		},
+	}
+	require.NoError(t, longEntry.SerializeFields())
+	require.NoError(t, store.Create(ctx, longEntry))
+
+	session, err := store.GetSessionLogs(ctx, parent, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, session.Logs, 2)
+
+	byID := map[string]Log{}
+	for _, l := range session.Logs {
+		byID[l.ID] = l
+	}
+
+	short := byID["t7-session-short-1"]
+	assert.Equal(t, answer, short.ListPreview, "会话行须携带与列表一致的最新一条预览")
+	assert.Empty(t, short.ContentSummary, "会话行不得携带全文")
+
+	long := byID["t7-session-long-1"]
+	assert.LessOrEqual(t, len(long.ListPreview), 512, "会话行预览须截断到 512 字节以内")
+	assert.Empty(t, long.ContentSummary, "会话行不得携带全文")
+
+	listed, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	listByID := map[string]Log{}
+	for _, l := range listed.Logs {
+		listByID[l.ID] = l
+	}
+	assert.Equal(t, listByID["t7-session-short-1"].ListPreview, short.ListPreview, "会话预览须与列表预览一致")
+	assert.Equal(t, listByID["t7-session-long-1"].ListPreview, long.ListPreview, "会话预览须与列表预览一致")
 }
 
 // TestListProjectionMalformedJsonRowStillReturned 畸形 JSON 行不阻断整页查询且该行正常返回

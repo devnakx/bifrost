@@ -14,7 +14,7 @@ import (
 
 // 列表响应字段收敛（T2）钉子：
 // - SearchLogs 列表路径返回的 Log 序列化 JSON 不含 responses_input_history /
-//   responses_output 键；content_summary 截断到 512 字节
+//   responses_output / content_summary 键；list_preview 截断到 512 字节
 // - GetSessionLogs 投影隔离：仍返回消息预览字段，与改动前快照语义一致
 // - content_search 过滤基于存储列 content_summary，不受投影收敛影响
 //
@@ -35,6 +35,7 @@ func task2SessionEntry(parent, id string, summaryLen int) *Log {
 		Model:           "gpt-4o-mini",
 		Status:          "success",
 		ContentSummary:  strings.Repeat("s", summaryLen),
+		ListPreview:     strings.Repeat("p", summaryLen),
 		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{
 			responsesMessage(schemas.ResponsesInputMessageRoleUser, userBody),
 		},
@@ -80,10 +81,12 @@ func TestSearchLogsListFieldsSlimmed(t *testing.T) {
 			assert.False(t, hasInput, "列表路径不得下发 responses_input_history")
 			assert.False(t, hasOutput, "列表路径不得下发 responses_output")
 
-			// content_summary 有界：512 字节 + omitempty 空串为 0 字节
-			if summary, ok := m["content_summary"].(string); ok {
-				assert.LessOrEqual(t, len(summary), 512,
-					"content_summary 须截到 512 字节以内，实际长度 %d", len(summary))
+			// 列表行携带最新一条预览且有界，全文不进入投影
+			_, hasFull := m["content_summary"]
+			assert.False(t, hasFull, "列表路径不得下发 content_summary 全文")
+			if preview, ok := m["list_preview"].(string); ok {
+				assert.LessOrEqual(t, len(preview), 512,
+					"list_preview 须截到 512 字节以内，实际长度 %d", len(preview))
 			}
 		})
 	}

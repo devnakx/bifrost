@@ -1286,7 +1286,9 @@ func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outpu
 		// rows can push the /api/logs response past Cloud Run's 32MB body limit (500s).
 		// The full error is still served by the detail endpoint (GetLog / GET /api/logs/{id}).
 		"latency", "upstream_latency", "overhead_latency", "token_usage", "cost", "status", "stream",
-		fmt.Sprintf("substr(content_summary, 1, %d) AS content_summary", maxContentSummaryBytes),
+		// 列表行携带最新一条预览，截断 512；全量可搜索文本保留在存储列，
+		// 由 content_search 直接过滤，不进入投影
+		fmt.Sprintf("substr(list_preview, 1, %d) AS list_preview", maxContentSummaryBytes),
 		"metadata", "cache_debug",
 		"batch_debug",
 		// video_debug tells a settled video's aggregate cost row apart from the

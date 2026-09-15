@@ -992,6 +992,8 @@ func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
 
 	// Add selected key, virtual key, and routing rule to the result
 	for i, log := range result.Logs {
+		// 列表行仅携带 list_preview，清空 content_summary 全文
+		result.Logs[i].ContentSummary = ""
 		if log.SelectedKeyID != "" && log.SelectedKeyName != "" {
 			result.Logs[i].SelectedKey = findRedactedKey(redactedKeys, log.SelectedKeyID, log.SelectedKeyName)
 		}

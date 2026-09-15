@@ -221,7 +221,11 @@ export function getMessage(log?: LogEntry) {
 		}
 		return "";
 	}
-	// 列表瘦身后优先 content_summary，列表行不再依赖 responses_* 大字段
+	// 列表行优先使用截断预览，缺失或为空时回退全量摘要，不依赖 responses_* 大字段
+	const preview = log?.list_preview?.trim();
+	if (preview) {
+		return preview;
+	}
 	const summary = log?.content_summary?.trim();
 	if (summary) {
 		return summary;
@@ -260,6 +264,9 @@ export function getMessage(log?: LogEntry) {
 	const obj = log?.object as string | undefined;
 	if (obj === "image_edit" || obj === "image_edit_stream" || obj === "image_variation") {
 		return "Image file";
+	}
+	if (log?.list_preview) {
+		return log.list_preview;
 	}
 	if (log?.content_summary) {
 		return log.content_summary;

@@ -112,6 +112,7 @@ func TestBillingProjectionOmitsColumnsPricingNeverReads(t *testing.T) {
 		"responses_input_history",
 		"output_message",
 		"content_summary",
+		"list_preview",
 		"metadata",
 		"speech_input",
 		"transcription_input",

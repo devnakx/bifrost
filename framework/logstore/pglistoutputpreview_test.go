@@ -40,6 +40,11 @@ func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	// postgres 列表投影：仅保留 chat 输出裁剪函数，responses 两列整体移除
 	require.Contains(t, pgCols, "bifrost_safe_output_message_preview(",
 		"postgres 投影必须含 chat 输出裁剪函数调用；当前长度 %d", len(pgCols))
+	// 列限定接线：同名函数在不同列各有一处调用，裸函数名断言无法区分调用点
+	require.Contains(t, pgCols, "bifrost_safe_jsonb_preview(input_history,",
+		"postgres 列表投影必须含输入预览函数调用；当前长度 %d", len(pgCols))
+	require.Contains(t, pgCols, "bifrost_safe_output_message_preview(output_message,",
+		"postgres 列表投影必须含 chat 输出裁剪列限定调用；当前长度 %d", len(pgCols))
 	require.NotContains(t, pgCols, "bifrost_safe_responses_output_preview(",
 		"responses 输出裁剪已随字段收敛迁出列表投影")
 	for _, col := range []string{"output_message", "responses_output"} {
@@ -50,6 +55,16 @@ func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	require.NotContains(t, pgCols, "image_edit_input AS image_edit_input",
 		"postgres 投影不得原样透传 image_edit_input")
 
+	// 列表投影携带最新一条预览（截断 512），全文不进入投影：两方言一致
+	for _, cols := range []string{pgCols, sqliteCols} {
+		require.Contains(t, cols, "substr(list_preview, 1, 512) AS list_preview",
+			"列表投影必须含 list_preview 截断表达式；当前长度 %d", len(cols))
+	}
+	for _, cols := range []string{pgCols, pgSessionCols, sqliteCols, sqliteSessionCols} {
+		require.NotContains(t, cols, "content_summary",
+			"列表/session 投影不得再选 content_summary 全文")
+	}
+
 	// 对照断言：sqlite 列表投影仍裸读 chat 输出列（Go 侧裁剪兜底），防误伤
 	require.True(t, bareColumnRe("output_message").MatchString(sqliteCols),
 		"sqlite 投影必须保留裸 output_message 列读出（行为不变）")
@@ -59,6 +74,14 @@ func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	// session 投影：两方言都保留 responses 预览（postgres 走裁剪函数，sqlite 裸列）
 	require.Contains(t, pgSessionCols, "bifrost_safe_responses_output_preview(",
 		"postgres session 投影必须含 responses 输出裁剪函数调用")
+	require.Contains(t, pgSessionCols, "bifrost_safe_jsonb_preview(responses_input_history,",
+		"postgres session 投影必须含 responses 输入预览函数调用")
+	require.Contains(t, pgSessionCols, "bifrost_safe_responses_output_preview(responses_output,",
+		"postgres session 投影必须含 responses 输出裁剪列限定调用")
+	require.Contains(t, pgSessionCols, "bifrost_safe_jsonb_preview(input_history,",
+		"postgres session 投影继承列表基座输入预览调用")
+	require.Contains(t, pgSessionCols, "bifrost_safe_output_message_preview(output_message,",
+		"postgres session 投影继承列表基座输出裁剪调用")
 	require.True(t, bareColumnRe("responses_output").MatchString(sqliteSessionCols),
 		"sqlite session 投影必须保留裸 responses_output 列读出")
 }
@@ -261,6 +284,9 @@ func TestPostgresListProjectionEndToEndOutputPreview(t *testing.T) {
 	require.NotNil(t, chat.OutputMessageParsed.ChatAssistantMessage)
 	require.NotNil(t, chat.OutputMessageParsed.ChatAssistantMessage.Reasoning)
 	assert.Len(t, *chat.OutputMessageParsed.ChatAssistantMessage.Reasoning, maxListOutputPreviewRunes, "reasoning 同样截断")
+	assert.NotEmpty(t, chat.ListPreview, "chat 列表行须携带最新一条预览")
+	assert.LessOrEqual(t, len(chat.ListPreview), 512, "预览须截断到 512 字节以内")
+	assert.Empty(t, chat.ContentSummary, "列表行不得携带全文")
 
 	edit := byID["pg-out-imageedit-1"]
 	require.NotNil(t, edit.ImageEditInputParsed, "image edit 列表行保留 prompt 结构")

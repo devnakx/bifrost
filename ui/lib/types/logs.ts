@@ -701,6 +701,7 @@ export interface LogEntry {
 	input_history: ChatMessage[];
 	responses_input_history?: ResponsesMessage[];
 	content_summary?: string;
+	list_preview?: string;
 	output_message?: ChatMessage;
 	responses_output?: ResponsesMessage[];
 	embedding_output?: BifrostEmbedding[];

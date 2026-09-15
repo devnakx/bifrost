@@ -393,6 +393,56 @@ func TestChApplyStructUpdateSkipsDedupKeys(t *testing.T) {
 	assert.Equal(t, "openai", row.Provider)
 }
 
+// TestClickHouseLogColumnDefsCarryListPreview 锁定 CH 建表列与全文列对齐：
+// clickhouseColumnDefs 从 Log 结构体派生，list_preview 须与 content_summary
+// 同为 String 列（新建表直接建出，存量表由 clickhouseReconcileColumns 补齐）。
+func TestClickHouseLogColumnDefsCarryListPreview(t *testing.T) {
+	defs, err := clickhouseColumnDefs(chUnitSchemaDB(), &Log{})
+	require.NoError(t, err)
+	byDef := make(map[string]struct{}, len(defs))
+	for _, d := range defs {
+		byDef[d] = struct{}{}
+	}
+	_, hasFull := byDef["`content_summary` String"]
+	_, hasPreview := byDef["`list_preview` String"]
+	assert.True(t, hasFull, "建表列须含 content_summary 全文列")
+	assert.True(t, hasPreview, "建表列须含 list_preview 预览列")
+}
+
+// TestChApplyUpdateMapCarriesListPreview 锁定 CH 更新门 map 路径双列：
+// 更新 gate 下发的 list_preview 须经 chApplyUpdateMap 落到行上。
+func TestChApplyUpdateMapCarriesListPreview(t *testing.T) {
+	ctx := context.Background()
+	st, err := chParseSchema(chUnitSchemaDB(), &Log{})
+	require.NoError(t, err)
+
+	row := *chTestLog("log-preview-1", time.Now().UTC().Truncate(time.Millisecond))
+	dest := reflect.ValueOf(&row).Elem()
+
+	require.NoError(t, chApplyUpdateMap(ctx, st, dest, map[string]interface{}{
+		"content_summary": "全文摘要",
+		"list_preview":    "最新一条",
+	}))
+	assert.Equal(t, "全文摘要", row.ContentSummary)
+	assert.Equal(t, "最新一条", row.ListPreview)
+}
+
+// TestChApplyStructUpdateCarriesListPreview 锁定 CH 更新门 struct 路径双列：
+// 非零 ListPreview 须经 chApplyStructUpdate 覆盖到行上。
+func TestChApplyStructUpdateCarriesListPreview(t *testing.T) {
+	ctx := context.Background()
+	st, err := chParseSchema(chUnitSchemaDB(), &Log{})
+	require.NoError(t, err)
+
+	row := *chTestLog("log-preview-2", time.Now().UTC().Truncate(time.Millisecond))
+	dest := reflect.ValueOf(&row).Elem()
+
+	update := Log{ContentSummary: "全文摘要", ListPreview: "最新一条"}
+	require.NoError(t, chApplyStructUpdate(ctx, st, dest, reflect.ValueOf(&update).Elem()))
+	assert.Equal(t, "全文摘要", row.ContentSummary)
+	assert.Equal(t, "最新一条", row.ListPreview)
+}
+
 // --- Integration tests (require docker-compose clickhouse) ---
 
 func TestClickHouseCreateAndFind(t *testing.T) {
@@ -420,6 +470,31 @@ func TestClickHouseCreateAndFind(t *testing.T) {
 	assert.True(t, hasLogs)
 
 	require.NoError(t, store.Ping(ctx))
+}
+
+// TestClickHouseListPreviewParity 锁定 CH 端到端双列：写入经
+// CreateIfNotExists 落库双列，详情读回双列，列表投影下发预览截断且不出全文。
+func TestClickHouseListPreviewParity(t *testing.T) {
+	store := trySetupClickHouseStore(t)
+	ctx := context.Background()
+	ts := time.Now().UTC().Truncate(time.Millisecond)
+
+	full := "ch-full-marker " + strings.Repeat("F", 2000)
+	entry := chTestLog("ch-list-preview-1", ts)
+	entry.ContentSummary = full
+	entry.ListPreview = "ch-preview short"
+	require.NoError(t, store.CreateIfNotExists(ctx, entry))
+
+	found, err := store.FindByID(ctx, "ch-list-preview-1")
+	require.NoError(t, err)
+	assert.Equal(t, full, found.ContentSummary)
+	assert.Equal(t, "ch-preview short", found.ListPreview)
+
+	result, err := store.SearchLogs(ctx, SearchFilters{ContentSearch: "ch-full-marker"}, PaginationOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, result.Logs, 1)
+	assert.Equal(t, "ch-preview short", result.Logs[0].ListPreview)
+	assert.Empty(t, result.Logs[0].ContentSummary)
 }
 
 func TestClickHouseIdempotentCreate(t *testing.T) {

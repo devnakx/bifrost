@@ -96,18 +96,19 @@ describe("getMessage", () => {
 		expect(getMessage(log)).toBe('User: show me a pastel palette\nAssistant Tool Call: display_color_palette({"theme":"pastel"})');
 	});
 
-	it("returns content_summary when present even if last responses input is a tool output", () => {
+	it("returns list_preview over content_summary when both are present", () => {
 		const log = {
 			object: "response.stream",
+			list_preview: "预览优先",
 			content_summary: "已根据参考图生成",
 			responses_input_history: [
 				{ role: "user", content: "生成两张图像" },
 				{ type: "custom_tool_call_output", call_id: "call_1", output: "Script completed Wall time 53.3 seconds" },
 			],
-			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被 content_summary 覆盖" }] }],
+			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被预览覆盖" }] }],
 		} as unknown as LogEntry;
 
-		expect(getMessage(log)).toBe("已根据参考图生成");
+		expect(getMessage(log)).toBe("预览优先");
 	});
 
 	it("falls back to content_summary when agent turn has no assistant text output", () => {
@@ -160,15 +161,31 @@ describe("getMessage", () => {
 		expect(getMessage(log)).toBe("补全三视图");
 	});
 
-	it("returns content_summary for responses requests", () => {
+	it("returns list_preview for responses requests", () => {
 		const log = {
 			object: "response.stream",
+			list_preview: "preview",
 			content_summary: "hi",
 			responses_input_history: [{ role: "user", content: "hello" }],
-			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被 content_summary 覆盖" }] }],
+			responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被预览覆盖" }] }],
 		} as unknown as LogEntry;
 
-		expect(getMessage(log)).toBe("hi");
+		expect(getMessage(log)).toBe("preview");
+	});
+
+	it("falls back to content_summary when list_preview is empty or absent", () => {
+		const makeLog = (list_preview?: string) =>
+			({
+				object: "response.stream",
+				list_preview,
+				content_summary: "全量摘要回退",
+				responses_input_history: [{ role: "user", content: "hello" }],
+				responses_output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "应被摘要覆盖" }] }],
+			}) as unknown as LogEntry;
+
+		expect(getMessage(makeLog(""))).toBe("全量摘要回退");
+		expect(getMessage(makeLog("   "))).toBe("全量摘要回退");
+		expect(getMessage(makeLog(undefined))).toBe("全量摘要回退");
 	});
 	it("returns current assistant output when last chat input is a tool message", () => {
 		const log = {

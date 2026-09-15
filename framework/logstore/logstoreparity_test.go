@@ -178,6 +178,7 @@ func (s parityLogSpec) toLog(base time.Time) *Log {
 		Metadata:              s.metadata,
 		CacheDebug:            s.cacheMetadata,
 		ContentSummary:        s.content,
+		ListPreview:           s.content,
 		ParentRequestID:       s.parentID,
 		ClusterNodeID:         s.nodeID,
 		BudgetIDs:             s.budgetIDs,
@@ -463,6 +464,7 @@ func logProjection(l *Log) map[string]any {
 		"complexity_tier": l.ComplexityTier, "complexity_mechanism": l.ComplexityMechanism,
 		"complexity_score": l.ComplexityScore, "session_id": l.SessionID,
 		"content_summary": l.ContentSummary,
+		"list_preview":    l.ListPreview,
 	}
 }
 

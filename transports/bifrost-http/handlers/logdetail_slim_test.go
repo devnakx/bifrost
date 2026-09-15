@@ -260,3 +260,39 @@ func TestGetLogMessages_NotFoundPreserves404(t *testing.T) {
 	h.getLogMessages(reqCtx)
 	assert.Equal(t, fasthttp.StatusNotFound, reqCtx.Response.StatusCode())
 }
+
+// TestGetLogByID_ReturnsDualSummaryFields 详情同时返回 content_summary 全量与 list_preview 预览
+func TestGetLogByID_ReturnsDualSummaryFields(t *testing.T) {
+	h, store := newLogDetailFixture(t)
+	ctx := context.Background()
+	entry := &logstore.Log{
+		ID:                  "detail-dual-1",
+		Timestamp:           time.Now().UTC(),
+		Provider:            "openai",
+		Model:               "gpt-4o-mini",
+		Object:              "chat.completion",
+		Status:              "success",
+		InputHistoryParsed:  []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("split-full-alpha")}}},
+		OutputMessageParsed: &schemas.ChatMessage{Role: schemas.ChatMessageRoleAssistant, Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("split-answer-epsilon")}},
+	}
+	require.NoError(t, entry.SerializeFields())
+	require.NoError(t, store.Create(ctx, entry))
+
+	var req fasthttp.Request
+	req.SetRequestURI("/api/logs/detail-dual-1")
+	reqCtx := &fasthttp.RequestCtx{}
+	reqCtx.Init(&req, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil)
+	reqCtx.SetUserValue("id", "detail-dual-1")
+	h.getLogByID(reqCtx)
+	require.Equal(t, fasthttp.StatusOK, reqCtx.Response.StatusCode())
+	var m map[string]json.RawMessage
+	require.NoError(t, sonic.Unmarshal(reqCtx.Response.Body(), &m))
+	require.Contains(t, m, "content_summary")
+	require.Contains(t, m, "list_preview")
+	var full, preview string
+	require.NoError(t, sonic.Unmarshal(m["content_summary"], &full))
+	require.NoError(t, sonic.Unmarshal(m["list_preview"], &preview))
+	assert.Contains(t, full, "split-full-alpha")
+	assert.Contains(t, full, "split-answer-epsilon")
+	assert.Equal(t, "split-answer-epsilon", preview)
+}

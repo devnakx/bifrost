@@ -13,6 +13,8 @@ import (
 	"github.com/maximhq/bifrost/framework/logstore"
 	loggingplugin "github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
 )
 
@@ -24,6 +26,8 @@ type countMock struct {
 	lastFilters   *logstore.SearchFilters
 	deleteCalls   int
 	searchCalls   int
+	// logsToReturn 非空时 Search 原样返回该行集，用于列表字段装配校验
+	logsToReturn []logstore.Log
 }
 
 func newCountMock(total int64) *countMock {
@@ -38,6 +42,14 @@ func (m *countMock) Search(_ context.Context, filters *logstore.SearchFilters, p
 	m.calls = append(m.calls, cp)
 	cf := *filters
 	m.lastFilters = &cf
+	if m.logsToReturn != nil {
+		return &logstore.SearchResult{
+			Logs:       m.logsToReturn,
+			Pagination: logstore.PaginationOptions{Limit: pagination.Limit, Offset: pagination.Offset, SortBy: pagination.SortBy, Order: pagination.Order, TotalCount: int64(len(m.logsToReturn))},
+			Stats:      logstore.SearchStats{TotalRequests: int64(len(m.logsToReturn))},
+			HasLogs:    true,
+		}, nil
+	}
 	// 模拟 SkipCount 时 COUNT 被跳过返回 0
 	if pagination.SkipCount {
 		return &logstore.SearchResult{
@@ -489,4 +501,36 @@ func TestLogsCountCache_ExplicitTimeWindow(t *testing.T) {
 	if r1.Pagination.TotalCount != r2.Pagination.TotalCount || r2.Pagination.TotalCount != 88 {
 		t.Fatalf("(h) 两次 total 应一致 88，实际 %d vs %d", r1.Pagination.TotalCount, r2.Pagination.TotalCount)
 	}
+}
+
+// TestGetLogs_ListRowsCarryPreviewWithoutFullText 列表行携带 list_preview 且不含 content_summary 全文
+func TestGetLogs_ListRowsCarryPreviewWithoutFullText(t *testing.T) {
+	SetLogger(&mockLogger{})
+	mock := newCountMock(1)
+	mock.logsToReturn = []logstore.Log{{
+		ID:             "split-list-1",
+		Provider:       "openai",
+		Model:          "gpt-4o-mini",
+		Object:         "chat.completion",
+		Status:         "success",
+		ContentSummary: "split-full-alpha split-full-beta split-full-gamma",
+		ListPreview:    "split-answer-epsilon",
+	}}
+	h := NewLoggingHandler(mock, &logsListCapRedactedKeysStub{}, &lib.Config{})
+	var req fasthttp.Request
+	req.SetRequestURI("/api/logs?limit=5")
+	reqCtx := &fasthttp.RequestCtx{}
+	reqCtx.Init(&req, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil)
+	h.getLogs(reqCtx)
+	require.Equal(t, fasthttp.StatusOK, reqCtx.Response.StatusCode())
+	var wire map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(reqCtx.Response.Body(), &wire))
+	var rows []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wire["logs"], &rows))
+	require.Len(t, rows, 1)
+	assert.NotContains(t, rows[0], "content_summary", "列表行不得携带 content_summary 全文")
+	require.Contains(t, rows[0], "list_preview")
+	var preview string
+	require.NoError(t, json.Unmarshal(rows[0]["list_preview"], &preview))
+	assert.Equal(t, "split-answer-epsilon", preview)
 }
