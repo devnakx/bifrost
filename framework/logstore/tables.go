@@ -290,7 +290,8 @@ type Log struct {
 	StopReason              *string              `gorm:"type:varchar(50);index:idx_logs_stop_reason" json:"stop_reason,omitempty"`                   // Why the model stopped: "stop", "length", "content_filter", "tool_calls", etc.
 	ErrorDetails            string               `gorm:"type:text" json:"-"`                                                                         // JSON serialized *schemas.BifrostError
 	Stream                  bool                 `gorm:"default:false" json:"stream"`                                                                // true if this was a streaming response
-	ContentSummary          string               `gorm:"type:text" json:"content_summary,omitempty"`                                                 // Last user message preview; UI log-list display fallback when payload fields are offloaded to object storage
+	ContentSummary          string               `gorm:"type:text" json:"content_summary,omitempty"`                                                 // Full searchable text across input/output transcripts; searched by content_search and FTS
+	ListPreview             string               `gorm:"type:text" json:"list_preview,omitempty"`                                                    // Latest single message preview for log-list display
 	RawRequest              string               `gorm:"type:text" json:"raw_request,omitempty"`                                                         // Populated when `send-back-raw-request` is on
 	RawResponse             string               `gorm:"type:text" json:"raw_response,omitempty"`                                                        // Populated when `send-back-raw-response` is on
 	PassthroughRequestBody  string               `gorm:"type:text" json:"passthrough_request_body,omitempty"`                                        // Raw body for passthrough requests (UTF-8)
@@ -918,13 +919,17 @@ func (l *Log) SerializeFields() error {
 		}
 	}
 
-	// 优先构建 input-only 摘要，仅取末条 user/assistant 消息，避免 system/developer 污染预览
-	// 已有值则跳过，未命中 input-only 再回退全量摘要
+	// content_summary 存全量可搜索文本，已有值则跳过
 	if l.ContentSummary == "" {
+		l.ContentSummary = l.BuildContentSummary()
+	}
+
+	// list_preview 存最新一条预览，已有值则跳过，未命中 input-only 再回退全量摘要
+	if l.ListPreview == "" {
 		if s := l.BuildInputContentSummary(); s != "" {
-			l.ContentSummary = s
+			l.ListPreview = s
 		} else {
-			l.ContentSummary = l.BuildContentSummary()
+			l.ListPreview = l.BuildContentSummary()
 		}
 	}
 

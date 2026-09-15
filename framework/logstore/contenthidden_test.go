@@ -3,6 +3,7 @@ package logstore
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,7 +143,9 @@ func TestHybrid_ContentHiddenBatchMixed(t *testing.T) {
 	visibleRow, err := inner.FindByID(ctx, "batch-visible")
 	require.NoError(t, err)
 	assert.False(t, visibleRow.ContentHidden)
-	assert.Equal(t, "sensitive answer", visibleRow.ContentSummary)
+	assert.Contains(t, visibleRow.ContentSummary, "sensitive question")
+	assert.Contains(t, visibleRow.ContentSummary, "sensitive answer")
+	assert.Equal(t, "sensitive answer", visibleRow.ListPreview)
 
 	hiddenRow, err := inner.FindByID(ctx, "batch-hidden")
 	require.NoError(t, err)
@@ -180,4 +183,56 @@ func TestHybrid_ContentHiddenProjectedReadsKeepFlag(t *testing.T) {
 	require.NotNil(t, found)
 	assert.True(t, found.ContentHidden)
 	assert.Empty(t, found.InputHistory, "projected read of a hidden log must not hydrate")
+}
+
+func TestHybrid_ContentHiddenClearsListPreview(t *testing.T) {
+	hybrid, inner, _ := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+
+	entry := newContentHiddenTestEntry("hidden-preview-1")
+	entry.ContentHidden = true
+	require.NoError(t, entry.SerializeFields())
+	require.NotEmpty(t, entry.ListPreview, "前置条件：序列化后预览非空")
+
+	require.NoError(t, hybrid.Create(ctx, entry))
+
+	// 隐藏行双列为空：DB 行与回传入口皆无预览
+	dbRow, err := inner.FindByID(ctx, "hidden-preview-1")
+	require.NoError(t, err)
+	assert.Empty(t, dbRow.ContentSummary)
+	assert.Empty(t, dbRow.ListPreview)
+	assert.Empty(t, entry.ListPreview)
+}
+
+func TestHybrid_ContentSummarySplitDualColumns(t *testing.T) {
+	hybrid, inner, _ := newTestHybrid(t)
+	defer hybrid.Close(context.Background())
+	ctx := context.Background()
+
+	longUser := strings.Repeat("a", 400)
+	longAnswer := strings.Repeat("b", 600)
+	entry := newContentHiddenTestEntry("split-dual-1")
+	entry.InputHistoryParsed[0].Content = &schemas.ChatMessageContent{ContentStr: &longUser}
+	entry.OutputMessageParsed = &schemas.ChatMessage{
+		Content: &schemas.ChatMessageContent{ContentStr: &longAnswer},
+	}
+	require.NoError(t, entry.SerializeFields())
+	wantPreview := truncateTag(entry.BuildInputContentSummary(), maxContentSummaryBytes)
+	require.Equal(t, 600, len(entry.BuildInputContentSummary()), "前置条件：最新一条预览超 512")
+	require.Equal(t, maxContentSummaryBytes, len(wantPreview))
+
+	require.NoError(t, hybrid.Create(ctx, entry))
+
+	dbRow, err := inner.FindByID(ctx, "split-dual-1")
+	require.NoError(t, err)
+	// 全量不被截断：双 transcript 完整落库
+	assert.Contains(t, dbRow.ContentSummary, longUser)
+	assert.Contains(t, dbRow.ContentSummary, longAnswer)
+	assert.Greater(t, len(dbRow.ContentSummary), maxContentSummaryBytes)
+	// 预览列截断 512，DB 行与回传入口一致
+	assert.Equal(t, wantPreview, dbRow.ListPreview)
+	assert.Equal(t, wantPreview, entry.ListPreview)
+	assert.NotEmpty(t, entry.ContentSummary)
+	assert.NotEmpty(t, dbRow.ListPreview)
 }

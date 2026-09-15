@@ -130,11 +130,14 @@ func applySerializedLogUpdates(
 	if data.ChatOutput != nil && contentLoggingEnabled {
 		updates["output_message"] = entry.OutputMessage
 		updates["content_summary"] = entry.ContentSummary
+		updates["list_preview"] = entry.ListPreview
 	}
 
 	if contentLoggingEnabled {
 		if data.ResponsesOutput != nil {
 			updates["responses_output"] = entry.ResponsesOutput
+			updates["content_summary"] = entry.ContentSummary
+			updates["list_preview"] = entry.ListPreview
 		}
 		if data.ListModelsOutput != nil {
 			updates["list_models_output"] = entry.ListModelsOutput
@@ -145,10 +148,12 @@ func applySerializedLogUpdates(
 		if data.RerankOutput != nil {
 			updates["rerank_output"] = entry.RerankOutput
 			updates["content_summary"] = entry.ContentSummary
+			updates["list_preview"] = entry.ListPreview
 		}
 		if data.OCROutput != nil {
 			updates["ocr_output"] = entry.OCROutput
 			updates["content_summary"] = entry.ContentSummary
+			updates["list_preview"] = entry.ListPreview
 		}
 		if data.SpeechOutput != nil {
 			updates["speech_output"] = entry.SpeechOutput

@@ -246,6 +246,77 @@ func TestSessionLogsInheritCap(t *testing.T) {
 	assert.LessOrEqual(t, len(data), maxPreviewElementBytes, "单元素序列化长度须不超过 16384 字节")
 }
 
+// newContentSummarySplitFixture 构造双 transcript 夹具：chat 双输入 + 单条输出，
+// responses 单输入 + 单输出，各段用特异标记区分
+func newContentSummarySplitFixture() *Log {
+	return &Log{
+		ID:        "split-1",
+		Timestamp: time.Now().UTC(),
+		Object:    "chat.completion",
+		Provider:  "openai",
+		Model:     "gpt-4o-mini",
+		Status:    "success",
+		InputHistoryParsed: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: strPtr("split-first-alpha")}},
+			{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: strPtr("split-second-beta")}},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: strPtr("split-answer-epsilon")},
+		},
+		ResponsesInputHistoryParsed: []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleUser, "split-resp-gamma")},
+		ResponsesOutputParsed:       []schemas.ResponsesMessage{responsesMessage(schemas.ResponsesInputMessageRoleAssistant, "split-resp-delta")},
+	}
+}
+
+// TestContentSummarySplit_BuildInputReturnsLatestOnly 锁定预览语义：
+// BuildInputContentSummary 仍只返回最新一条（输出 assistant 晚于输入 user）
+func TestContentSummarySplit_BuildInputReturnsLatestOnly(t *testing.T) {
+	entry := newContentSummarySplitFixture()
+	assert.Equal(t, "split-answer-epsilon", entry.BuildInputContentSummary())
+}
+
+// TestContentSummarySplit_BuildContentSummaryHasDualTranscripts 锁定全量语义：
+// BuildContentSummary 含双 transcript 全量，且与单条预览不等
+func TestContentSummarySplit_BuildContentSummaryHasDualTranscripts(t *testing.T) {
+	entry := newContentSummarySplitFixture()
+	full := entry.BuildContentSummary()
+	for _, marker := range []string{"split-first-alpha", "split-second-beta", "split-resp-gamma", "split-resp-delta", "split-answer-epsilon"} {
+		assert.Contains(t, full, marker)
+	}
+	assert.NotEqual(t, entry.BuildInputContentSummary(), full)
+}
+
+// TestContentSummarySplit_FullTextAndPreview 双断言对照：SerializeFields 后
+// content_summary 含双 transcript 全量，list_preview 仅为最新单条
+func TestContentSummarySplit_FullTextAndPreview(t *testing.T) {
+	entry := newContentSummarySplitFixture()
+	require.NoError(t, entry.SerializeFields())
+	for _, marker := range []string{"split-first-alpha", "split-second-beta", "split-resp-gamma", "split-resp-delta"} {
+		assert.Contains(t, entry.ContentSummary, marker)
+	}
+	assert.Equal(t, "split-answer-epsilon", entry.ListPreview)
+}
+
+// TestListPreview_EmptyFallbackToFullSummary list_preview 为空回退：
+// 无 input-only 命中时（仅错误详情）回退到全量摘要
+func TestListPreview_EmptyFallbackToFullSummary(t *testing.T) {
+	entry := &Log{
+		ID:        "split-fallback-1",
+		Timestamp: time.Now().UTC(),
+		Object:    "chat.completion",
+		Provider:  "openai",
+		Model:     "gpt-4o-mini",
+		Status:    "error",
+		ErrorDetailsParsed: &schemas.BifrostError{
+			Error: &schemas.ErrorField{Message: "split-fallback-zeta"},
+		},
+	}
+	require.NoError(t, entry.SerializeFields())
+	assert.Contains(t, entry.ContentSummary, "split-fallback-zeta")
+	assert.Equal(t, "split-fallback-zeta", entry.ListPreview)
+}
+
 // TestListProjectionMalformedJsonRowStillReturned 畸形 JSON 行不阻断整页查询且该行正常返回
 //
 // json_valid 守卫使畸形行走 ELSE 原样透传分支；DeserializeFields 对畸形 JSON 静默置空

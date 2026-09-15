@@ -256,15 +256,15 @@ func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 		ClearPayload(dbEntry)
 		restorePricingMetadata()
 		dbEntry.ContentSummary = ""
+		dbEntry.ListPreview = ""
 		return
 	}
 
 	idx := findLastUserMessageIndex(dbEntry.InputHistoryParsed)
 
-	// Content summary follows the same last-text-message rule for all request shapes.
-	dbEntry.ContentSummary = dbEntry.BuildInputContentSummary()
-	// Bound content summary to prevent large prompts from bloating the DB row.
-	dbEntry.ContentSummary = truncateTag(dbEntry.ContentSummary, maxContentSummaryBytes)
+	// content_summary 存全量可搜索文本，不截断；list_preview 存最新一条预览，截断 512。
+	dbEntry.ContentSummary = dbEntry.BuildContentSummary()
+	dbEntry.ListPreview = truncateTag(dbEntry.BuildInputContentSummary(), maxContentSummaryBytes)
 
 	// Serialize last user message before ClearPayload zeros everything.
 	// Attachment payloads (base64 images/files/audio, media URLs) are replaced
@@ -303,8 +303,8 @@ func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 // Create writes a lightweight DB row (with payload fields stripped per
 // excludedPayloadFields) and asynchronously offloads the full payload to
 // object storage. The caller's entry is preserved on DB failure by writing to
-// a shallow copy; on success, only ContentSummary is propagated back so the
-// caller can observe what was persisted.
+// a shallow copy; on success, ContentSummary and ListPreview are propagated
+// back so the caller can observe what was persisted.
 // extractUploadPayload returns the payload map to offload for entry. Hidden
 // entries always upload the complete payload: the exclusion list exists to
 // keep fields DB-resident, and hidden rows must not retain content in the DB.
@@ -328,6 +328,7 @@ func (h *HybridLogStore) Create(ctx context.Context, entry *Log) error {
 		return err
 	}
 	entry.ContentSummary = dbEntry.ContentSummary
+	entry.ListPreview = dbEntry.ListPreview
 	h.enqueueUpload(entry.ID, entry.Timestamp, payload, tags)
 	return nil
 }
@@ -348,6 +349,7 @@ func (h *HybridLogStore) CreateIfNotExists(ctx context.Context, entry *Log) erro
 		return err
 	}
 	entry.ContentSummary = dbEntry.ContentSummary
+	entry.ListPreview = dbEntry.ListPreview
 	h.enqueueUpload(entry.ID, entry.Timestamp, payload, tags)
 	return nil
 }
@@ -400,6 +402,7 @@ func (h *HybridLogStore) BatchCreateIfNotExists(ctx context.Context, entries []*
 
 	for i, entry := range origEntries {
 		entry.ContentSummary = dbEntries[i].ContentSummary
+		entry.ListPreview = dbEntries[i].ListPreview
 	}
 
 	for _, u := range uploads {

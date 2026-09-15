@@ -407,6 +407,7 @@ func MergePayloadFromJSON(l *Log, data []byte) error {
 	// reflects the correct data from object storage, not a potentially
 	// corrupted DB value (e.g. from client/server encoding mismatch).
 	l.ContentSummary = l.BuildContentSummary()
+	l.ListPreview = l.BuildInputContentSummary()
 	return nil
 }
 

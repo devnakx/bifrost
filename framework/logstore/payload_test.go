@@ -449,6 +449,22 @@ func TestPayloadFieldNames(t *testing.T) {
 	assert.NotEqual(t, "modified", payloadFields[0])
 }
 
+func TestMergePayloadFromJSON_RebuildsDualColumns(t *testing.T) {
+	entry := newContentSummarySplitFixture()
+	require.NoError(t, entry.SerializeFields())
+	payload := ExtractPayload(entry)
+	data, err := MarshalPayload(payload)
+	require.NoError(t, err)
+	ClearPayload(entry)
+	entry.ContentSummary = ""
+	entry.ListPreview = ""
+	require.NoError(t, MergePayloadFromJSON(entry, data))
+	for _, marker := range []string{"split-first-alpha", "split-second-beta", "split-resp-gamma", "split-resp-delta", "split-answer-epsilon"} {
+		assert.Contains(t, entry.ContentSummary, marker)
+	}
+	assert.Equal(t, "split-answer-epsilon", entry.ListPreview)
+}
+
 func strPtr(s string) *string {
 	return &s
 }

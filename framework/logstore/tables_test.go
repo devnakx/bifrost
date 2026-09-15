@@ -238,9 +238,9 @@ func TestDeserializeFieldsCostBreakdownFromColumns(t *testing.T) {
 	assert.Nil(t, log.CostBreakdown.InputCostDetails)
 }
 
-// TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem 锁住预览回归：
-// Responses 首条 system/developer 指令不得污染 content_summary，SerializeFields
-// 必须优先取末条 assistant 输出，无输出时回退末条真实 user 并跳过合成注入。
+// TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem 锁住双列语义：
+// content_summary 存全量可搜索文本（含 system 指令），list_preview 取末条
+// assistant 输出且不受 system/developer 污染，无输出时回退末条真实 user 并跳过合成注入。
 func TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem(t *testing.T) {
 	msgType := schemas.ResponsesMessageTypeMessage
 	systemRole := schemas.ResponsesInputMessageRoleSystem
@@ -260,12 +260,15 @@ func TestSerializeFieldsContentSummaryPrefersLastAssistantOverSystem(t *testing.
 		},
 	}
 	require.NoError(t, log.SerializeFields())
-	assert.Equal(t, assistantText, log.ContentSummary)
-	assert.NotContains(t, log.ContentSummary, "You are Codex")
+	assert.Contains(t, log.ContentSummary, userText)
+	assert.Contains(t, log.ContentSummary, assistantText)
+	assert.Equal(t, assistantText, log.ListPreview)
+	assert.NotContains(t, log.ListPreview, "You are Codex")
 }
 
 // TestSerializeFieldsContentSummarySkipsSyntheticUserInput 锁住合成注入回退：
-// 无 assistant 输出时取末条真实 user，跳过 <environment_context> 等合成文本。
+// 无 assistant 输出时 list_preview 取末条真实 user，跳过 <environment_context>
+// 等合成文本；content_summary 仍存全量。
 func TestSerializeFieldsContentSummarySkipsSyntheticUserInput(t *testing.T) {
 	msgType := schemas.ResponsesMessageTypeMessage
 	userRole := schemas.ResponsesInputMessageRoleUser
@@ -279,12 +282,14 @@ func TestSerializeFieldsContentSummarySkipsSyntheticUserInput(t *testing.T) {
 		},
 	}
 	require.NoError(t, log.SerializeFields())
-	assert.Equal(t, realUser, log.ContentSummary)
-	assert.NotContains(t, log.ContentSummary, "environment_context")
+	assert.Contains(t, log.ContentSummary, realUser)
+	assert.Equal(t, realUser, log.ListPreview)
+	assert.NotContains(t, log.ListPreview, "environment_context")
 }
 
 // TestSerializeFieldsContentSummaryPrefersLatestReasoning 锁住三者平等取最新：
-// 输出数组中推理摘要排在 assistant 文本之后时，content_summary 必须显示推理摘要而非回退到更早的文本。
+// 输出数组中推理摘要排在 assistant 文本之后时，list_preview 必须显示推理摘要
+// 而非回退到更早的文本；content_summary 含双段全量。
 func TestSerializeFieldsContentSummaryPrefersLatestReasoning(t *testing.T) {
 	assistantRole := schemas.ResponsesInputMessageRoleAssistant
 	assistantText := "已生成蓝色风格 Logo"
@@ -297,7 +302,9 @@ func TestSerializeFieldsContentSummaryPrefersLatestReasoning(t *testing.T) {
 		},
 	}
 	require.NoError(t, log.SerializeFields())
-	assert.Equal(t, reasoningText, log.ContentSummary)
+	assert.Contains(t, log.ContentSummary, assistantText)
+	assert.Contains(t, log.ContentSummary, reasoningText)
+	assert.Equal(t, reasoningText, log.ListPreview)
 }
 
 // TestDeserializeFieldsCostBreakdownNilWhenNoCost: a row with no cost gets no

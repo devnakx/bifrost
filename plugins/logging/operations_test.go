@@ -1924,7 +1924,7 @@ func assertMCPLogGovernanceFields(t *testing.T, logEntry *logstore.MCPToolLog, u
 	}
 }
 
-func TestUpdateLogEntryPreservesResponsesInputContentSummary(t *testing.T) {
+func TestUpdateLogEntryRefreshesDualColumnsForResponsesOutput(t *testing.T) {
 	store := newTestStore(t)
 	plugin := &LoggerPlugin{
 		store:  store,
@@ -1967,11 +1967,11 @@ func TestUpdateLogEntryPreservesResponsesInputContentSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindByID() error = %v", err)
 	}
-	if !strings.Contains(logEntry.ContentSummary, inputText) {
-		t.Fatalf("expected content summary to preserve responses input, got %q", logEntry.ContentSummary)
+	if !strings.Contains(logEntry.ContentSummary, responsesText) {
+		t.Fatalf("expected content summary to carry responses output, got %q", logEntry.ContentSummary)
 	}
-	if strings.Contains(logEntry.ContentSummary, responsesText) {
-		t.Fatalf("expected content summary to avoid overwriting with responses output-only data, got %q", logEntry.ContentSummary)
+	if logEntry.ListPreview != responsesText {
+		t.Fatalf("expected list preview to equal latest responses output, got %q", logEntry.ListPreview)
 	}
 }
 
@@ -2015,6 +2015,45 @@ func TestUpdateLogEntryUpdatesContentSummaryForChatOutput(t *testing.T) {
 	}
 	if !strings.Contains(logEntry.ContentSummary, chatText) {
 		t.Fatalf("expected content summary to include chat output, got %q", logEntry.ContentSummary)
+	}
+	if logEntry.ListPreview != chatText {
+		t.Fatalf("expected list preview to equal latest chat output, got %q", logEntry.ListPreview)
+	}
+}
+
+func TestUpdateGateDualColumnOracleFullTextAndSinglePreview(t *testing.T) {
+	firstText := "oracle-first-user-alpha"
+	secondText := "oracle-second-assistant-beta"
+	latestText := "oracle-latest-output-gamma"
+	entry := &logstore.Log{
+		InputHistoryParsed: []schemas.ChatMessage{
+			{
+				Role:    schemas.ChatMessageRoleUser,
+				Content: &schemas.ChatMessageContent{ContentStr: &firstText},
+			},
+			{
+				Role:    schemas.ChatMessageRoleAssistant,
+				Content: &schemas.ChatMessageContent{ContentStr: &secondText},
+			},
+		},
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role:    schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{ContentStr: &latestText},
+		},
+	}
+	if err := entry.SerializeFields(); err != nil {
+		t.Fatalf("SerializeFields() error = %v", err)
+	}
+	for _, want := range []string{firstText, secondText, latestText} {
+		if !strings.Contains(entry.ContentSummary, want) {
+			t.Fatalf("expected content summary to carry full text %q, got %q", want, entry.ContentSummary)
+		}
+	}
+	if entry.ListPreview != latestText {
+		t.Fatalf("expected list preview to equal latest single message %q, got %q", latestText, entry.ListPreview)
+	}
+	if strings.Contains(entry.ListPreview, firstText) {
+		t.Fatalf("expected list preview to hold a single message, got %q", entry.ListPreview)
 	}
 }
 

@@ -722,10 +722,13 @@ func TestHybrid_ContentSummaryUsesLastTextMessage(t *testing.T) {
 	require.NoError(t, entry.SerializeFields())
 	require.NoError(t, hybrid.CreateIfNotExists(ctx, entry))
 
-	// Read from inner DB to check content_summary.
+	// Read from inner DB to check the split columns: content_summary holds the
+	// full text, list_preview holds the last message.
 	dbLog, err := inner.FindByID(ctx, "summary-1")
 	require.NoError(t, err)
-	assert.Equal(t, outputText, dbLog.ContentSummary)
+	assert.Contains(t, dbLog.ContentSummary, inputText)
+	assert.Contains(t, dbLog.ContentSummary, outputText)
+	assert.Equal(t, outputText, dbLog.ListPreview)
 }
 
 func TestHybrid_ResponsesInputHistoryPreservesLastUserMessage(t *testing.T) {

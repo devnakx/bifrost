@@ -399,6 +399,7 @@ func estimateLogEntrySize(log *logstore.Log) int {
 		len(log.PassthroughRequestBody) +
 		len(log.PassthroughResponseBody) +
 		len(log.ContentSummary) +
+		len(log.ListPreview) +
 		len(log.CacheDebug) +
 		len(log.GuardrailDebug) +
 		len(log.RoutingMetadata) +

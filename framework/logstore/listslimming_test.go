@@ -138,7 +138,7 @@ func TestListSelectColumnsDropsResponsesPayloads(t *testing.T) {
 	}
 }
 
-// TestSearchLogsContentSearchStillFilters content_search 过滤回归：
+// TestSearchLogsContentSearchStillFilters content_search 过滤：
 // 过滤基于存储列 content_summary（非投影别名），投影收敛后仍须命中
 func TestSearchLogsContentSearchStillFilters(t *testing.T) {
 	store := newProjectionTestStore(t)
