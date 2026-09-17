@@ -151258,6 +151258,1003 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "93. Provider error messages survive the borrowed Bedrock handlers (bedrock-error-message)",
+      "description": "bedrock-runtime reports failures on its native APIs (Converse and InvokeModel) in AWS's own flat shape, {\"message\":\"...\",\"__type\":\"...\"}, not in the error envelope the Anthropic and OpenAI wire formats use. That matters on the InvokeModel path, taken when a tool carries defer_loading, or for tool_search / context_management on Anthropic-family models (see folder 71): the request and response bodies are served by anthropic.HandleAnthropicResponsesStream, whose ParseAnthropicError reads only the nested {\"type\":\"error\",\"error\":{...}} envelope, so error.message came back empty and the logs UI rendered no error at all while the reason survived only in the raw response. HandleProviderAPIError now seeds the message from a root-level \"message\" before the caller's own parser runs, and these cases pin that the reason the provider gave is the reason the caller is told. Bedrock's OpenAI-compatible surfaces (bedrock_openai_ep and Bedrock Mantle) are deliberately not covered here: they answer in the OpenAI envelope, which ParseOpenAIError already reads, so a case there cannot demonstrate the regression. The trigger is an out-of-range temperature, which AWS rejects with a ValidationException; each row is tagged [EXPECT-4XX] so the collection-level status test asserts the upstream rejection instead of requiring a 200, and if that temperature ever stops being rejected, that tag is what fails. The assertions compare against extra_fields.raw_response rather than AWS wording, so they survive a change in the text.",
+      "item": [
+        {
+          "name": "[EXPECT-4XX] bedrock/global.anthropic.claude-sonnet-4-6 /v1/responses InvokeModel 4xx reports the AWS message - bedrock-error-message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_output_tokens\":32,\"temperature\":5,\"input\":\"Say OK\",\"tools\":[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]},\"defer_loading\":true}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 500 || code === 502 || code === 504) { return; }",
+                  "if (pm.response.code < 400) { return; }",
+                  "var body = {};",
+                  "try { body = pm.response.json() || {}; } catch (e) { body = {}; }",
+                  "var errField = body.error || {};",
+                  "var message = typeof errField.message === 'string' ? errField.message : '';",
+                  "pm.test('bedrock invoke /v1/responses: error.message is not empty', function () {",
+                  "  pm.expect(message.length, 'error.message is empty: the provider body did not reach the caller. AWS reports every Bedrock failure as a flat {\"message\":...} which the Anthropic and OpenAI error parsers do not read, so the reason is dropped unless HandleProviderAPIError seeds it. body=' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock invoke /v1/responses: error.message is the provider text, not a placeholder', function () {",
+                  "  pm.expect(/^provider API error/i.test(message), 'error.message is a generic placeholder, not the reason the provider gave: ' + message).to.be.false;",
+                  "});",
+                  "var extra = body.extra_fields || {};",
+                  "var raw = extra.raw_response;",
+                  "if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { raw = null; } }",
+                  "var providerMessage = raw && typeof raw === 'object' && typeof raw.message === 'string' ? raw.message : '';",
+                  "pm.test('bedrock invoke /v1/responses: the provider body reached the caller to assert against', function () {",
+                  "  pm.expect(providerMessage.length, 'extra_fields.raw_response.message is empty, so the comparison below would pass vacuously. The harness enables allow_per_request_raw_override (the run aborts if it cannot) and this request sends x-bf-send-back-raw-response, so the AWS body should be here. body=' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock invoke /v1/responses: error.message carries what the provider actually said', function () {",
+                  "  pm.expect(message.indexOf(providerMessage) !== -1, 'error.message does not contain the provider text from extra_fields.raw_response.message. reported=' + message + ' provider=' + providerMessage).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[EXPECT-4XX] bedrock/global.anthropic.claude-sonnet-4-6 /v1/responses streaming InvokeModel 4xx reports the AWS message - bedrock-error-message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_output_tokens\":32,\"temperature\":5,\"stream\":true,\"input\":\"Say OK\",\"tools\":[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]},\"defer_loading\":true}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 529 && /overloaded/i.test(pm.response.text() || '')) { return; }",
+                  "if (code === 500 || code === 502 || code === 504) { return; }",
+                  "if (pm.response.code < 400) { return; }",
+                  "var body = {};",
+                  "try { body = pm.response.json() || {}; } catch (e) { body = {}; }",
+                  "var errField = body.error || {};",
+                  "var message = typeof errField.message === 'string' ? errField.message : '';",
+                  "pm.test('bedrock invoke /v1/responses stream: error.message is not empty', function () {",
+                  "  pm.expect(message.length, 'error.message is empty: the provider body did not reach the caller. AWS reports every Bedrock failure as a flat {\"message\":...} which the Anthropic and OpenAI error parsers do not read, so the reason is dropped unless HandleProviderAPIError seeds it. body=' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock invoke /v1/responses stream: error.message is the provider text, not a placeholder', function () {",
+                  "  pm.expect(/^provider API error/i.test(message), 'error.message is a generic placeholder, not the reason the provider gave: ' + message).to.be.false;",
+                  "});",
+                  "var extra = body.extra_fields || {};",
+                  "var raw = extra.raw_response;",
+                  "if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { raw = null; } }",
+                  "var providerMessage = raw && typeof raw === 'object' && typeof raw.message === 'string' ? raw.message : '';",
+                  "pm.test('bedrock invoke /v1/responses stream: the provider body reached the caller to assert against', function () {",
+                  "  pm.expect(providerMessage.length, 'extra_fields.raw_response.message is empty, so the comparison below would pass vacuously. The harness enables allow_per_request_raw_override (the run aborts if it cannot) and this request sends x-bf-send-back-raw-response, so the AWS body should be here. body=' + pm.response.text()).to.be.above(0);",
+                  "});",
+                  "pm.test('bedrock invoke /v1/responses stream: error.message carries what the provider actually said', function () {",
+                  "  pm.expect(message.indexOf(providerMessage) !== -1, 'error.message does not contain the provider text from extra_fields.raw_response.message. reported=' + message + ' provider=' + providerMessage).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "94. Bedrock web_search search_content_types stripping (bedrock-web-search-content-types)",
+      "description": "Bedrock Mantle's OpenAI-compatible Responses surface rejects search_content_types on web_search tools with HTTP 400 (\"The 'search_content_types' field is not supported for web search tools.\"). Bifrost now removes only that nested field while preserving the web_search tool and all other supported options. These cases pin the non-streaming and streaming Bedrock Mantle paths used by Codex. The non-streaming case inspects extra_fields.raw_request so a response that merely succeeds after dropping the entire tool cannot pass.",
+      "item": [
+        {
+          "name": "bedrock_mantle/openai.gpt-5.6-luna /v1/responses strips web_search search_content_types but keeps the tool - bedrock-web-search-content-types",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock_mantle/openai.gpt-5.6-luna\",\"input\":\"Reply with exactly: OK\",\"max_output_tokens\":32,\"tools\":[{\"type\":\"web_search\",\"search_content_types\":[\"text\",\"image\"]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var text = pm.response.text() || '';",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('bedrock_mantle web_search does not fail on search_content_types', function () {",
+                  "  pm.expect(text, 'unsupported nested field reached Mantle: ' + text).to.not.include(\"The 'search_content_types' field is not supported for web search tools.\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + text).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "var raw = (body.extra_fields || {}).raw_request;",
+                  "if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { raw = null; } }",
+                  "var tools = raw && raw.tools instanceof Array ? raw.tools : [];",
+                  "var web = null;",
+                  "for (var i = 0; i < tools.length; i++) { if (tools[i].type === 'web_search') { web = tools[i]; break; } }",
+                  "pm.test('bedrock_mantle keeps web_search while stripping only search_content_types', function () {",
+                  "  pm.expect(raw, 'extra_fields.raw_request missing - is send_back_raw_request honoured? body=' + text).to.be.an('object');",
+                  "  pm.expect(web, 'web_search tool was dropped: ' + JSON.stringify(raw)).to.be.an('object');",
+                  "  pm.expect(web, 'search_content_types reached Mantle: ' + JSON.stringify(web)).to.not.have.property('search_content_types');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock_mantle/openai.gpt-5.6-luna /v1/responses streaming strips web_search search_content_types - bedrock-web-search-content-types",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock_mantle/openai.gpt-5.6-luna\",\"stream\":true,\"input\":\"Reply with exactly: OK\",\"max_output_tokens\":32,\"tools\":[{\"type\":\"web_search\",\"search_content_types\":[\"text\",\"image\"]}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var text = pm.response.text() || '';",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('bedrock_mantle streaming web_search does not fail on search_content_types', function () {",
+                  "  pm.expect(text, 'unsupported nested field reached Mantle: ' + text).to.not.include(\"The 'search_content_types' field is not supported for web search tools.\");",
+                  "  pm.expect(pm.response.code, 'request failed: ' + text).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "pm.test('bedrock_mantle streaming web_search produces SSE events', function () {",
+                  "  pm.expect(text, 'no SSE events: ' + text).to.include('data:');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "95. Bedrock diagnostics stripping (bedrock-diagnostics-stripping)",
+      "description": "Claude Code sends diagnostics.previous_message_id on Anthropic Messages requests. Amazon Bedrock does not support this Anthropic-only field and returns HTTP 400 with \"diagnostics: Extra inputs are not permitted\" if it reaches the provider. The first two cases verify the shared typed sanitizer removes diagnostics from the provider request both without a harness user agent and with the Claude Code user agent from the reported incident. The raw provider request is inspected so a coincidental successful response cannot pass. The third case forces an unrelated Bedrock ValidationException on the same streaming Claude Code path and verifies the Anthropic error envelope carries a non-empty provider message instead of {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"\"}}.",
+      "item": [
+        {
+          "name": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0 /anthropic/v1/messages strips diagnostics - bedrock-diagnostics-stripping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-version",
+                "value": "2023-06-01"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"diagnostics\":{\"previous_message_id\":null}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var text = pm.response.text() || '';",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('Bedrock does not reject diagnostics', function () {",
+                  "  pm.expect(text, 'diagnostics reached Bedrock: ' + text).to.not.include('diagnostics: Extra inputs are not permitted');",
+                  "  pm.expect(pm.response.code, 'request failed: ' + text).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "var raw = (body.extra_fields || {}).raw_request;",
+                  "if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { raw = null; } }",
+                  "pm.test('Bedrock provider request strips diagnostics', function () {",
+                  "  pm.expect(raw, 'extra_fields.raw_request missing - is send_back_raw_request honoured? body=' + text).to.be.an('object');",
+                  "  pm.expect(raw.messages, 'provider request lost messages: ' + JSON.stringify(raw)).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(raw, 'diagnostics survived into Bedrock request: ' + JSON.stringify(raw)).to.not.have.property('diagnostics');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0 Claude Code UA strips diagnostics - bedrock-diagnostics-stripping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-version",
+                "value": "2023-06-01"
+              },
+              {
+                "key": "User-Agent",
+                "value": "claude-cli/2.1.267 (external, cli)"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"diagnostics\":{\"previous_message_id\":null}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var text = pm.response.text() || '';",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('Claude Code request is not rejected for diagnostics', function () {",
+                  "  pm.expect(text, 'diagnostics reached Bedrock: ' + text).to.not.include('diagnostics: Extra inputs are not permitted');",
+                  "  pm.expect(pm.response.code, 'request failed: ' + text).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json();",
+                  "var raw = (body.extra_fields || {}).raw_request;",
+                  "if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { raw = null; } }",
+                  "pm.test('Claude Code path strips diagnostics from the Bedrock provider request', function () {",
+                  "  pm.expect(raw, 'extra_fields.raw_request missing - is send_back_raw_request honoured? body=' + text).to.be.an('object');",
+                  "  pm.expect(raw.messages, 'provider request lost messages: ' + JSON.stringify(raw)).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(raw, 'diagnostics survived into Bedrock request: ' + JSON.stringify(raw)).to.not.have.property('diagnostics');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[EXPECT-4XX] bedrock/global.anthropic.claude-sonnet-4-6 Claude Code streaming error preserves Bedrock message - bedrock-diagnostics-stripping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "anthropic-version",
+                "value": "2023-06-01"
+              },
+              {
+                "key": "User-Agent",
+                "value": "claude-cli/2.1.267 (external, cli)"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"bedrock/global.anthropic.claude-sonnet-4-6\",\"max_tokens\":32,\"stream\":true,\"temperature\":5,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"diagnostics\":{\"previous_message_id\":null}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "var text = pm.response.text() || '';",
+                  "if ([401, 403, 429].indexOf(code) !== -1) { return; }",
+                  "if (code === 503 && /ServiceUnavailable|Throttl|ModelNotReady/i.test(text)) { return; }",
+                  "if (code === 529 && /overloaded/i.test(text)) { return; }",
+                  "if (code === 500 || code === 502 || code === 504) { return; }",
+                  "if (code < 400) { return; }",
+                  "var body = {};",
+                  "try { body = pm.response.json() || {}; } catch (e) { body = {}; }",
+                  "var errField = body.error || {};",
+                  "var message = typeof errField.message === 'string' ? errField.message : '';",
+                  "pm.test('Claude Code streaming path returns an Anthropic error envelope', function () {",
+                  "  pm.expect(body.type, 'unexpected error body: ' + text).to.equal('error');",
+                  "  pm.expect(errField, 'missing error object: ' + text).to.be.an('object');",
+                  "});",
+                  "pm.test('Claude Code streaming path preserves the Bedrock error message', function () {",
+                  "  pm.expect(message.length, 'Bedrock error was converted to an empty Anthropic message: ' + text).to.be.above(0);",
+                  "  pm.expect(message.toLowerCase(), 'expected the forced temperature validation reason: ' + message).to.include('temperature');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "96. GenAI Speech Streaming (speech-stream)",
+      "description": "Regression coverage for speech responses on the Google GenAI streaming surface. The normal case pins Gemini TTS PCM chunks and their exact L16 MIME metadata. The criss-cross case sends the same GenAI speechConfig shape to OpenAI gpt-4o-mini-tts and pins the converted MP3 chunks. Both cases require valid SSE JSON, non-empty decodable inlineData audio, and a terminal STOP reason; this catches a missing speech stream converter, incorrect MIME metadata, and dropped camelCase voice configuration.",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+              "var responseText = pm.response.text() || '';",
+              "var parsedEvents = [];",
+              "var invalidEvents = [];",
+              "responseText.split('\\n').forEach(function (line) {",
+              "  if (line.indexOf('data: ') !== 0) { return; }",
+              "  var payload = line.slice(6).trim();",
+              "  if (!payload || payload === '[DONE]') { return; }",
+              "  try { parsedEvents.push(JSON.parse(payload)); } catch (e) { invalidEvents.push(payload); }",
+              "});",
+              "var audioParts = [];",
+              "var mimeTypes = [];",
+              "var finishReasons = [];",
+              "var streamErrors = [];",
+              "parsedEvents.forEach(function (event) {",
+              "  if (event.error) { streamErrors.push(event.error); }",
+              "  (event.candidates || []).forEach(function (candidate) {",
+              "    if (candidate.finishReason) { finishReasons.push(candidate.finishReason); }",
+              "    var parts = candidate.content && candidate.content.parts || [];",
+              "    parts.forEach(function (part) {",
+              "      if (part.inlineData && part.inlineData.data) {",
+              "        audioParts.push(part.inlineData.data);",
+              "        mimeTypes.push(part.inlineData.mimeType);",
+              "      }",
+              "    });",
+              "  });",
+              "});",
+              "var isOpenAI = pm.request.url.toString().indexOf('openai/gpt-4o-mini-tts') !== -1;",
+              "var expectedMime = isOpenAI ? 'audio/mp3' : 'audio/L16;codec=pcm;rate=24000';",
+              "var decodedBytes = 0;",
+              "audioParts.forEach(function (data) {",
+              "  try { decodedBytes += Buffer.from(data, 'base64').length; } catch (e) {}",
+              "});",
+              "pm.test('speech-stream request succeeded', function () {",
+              "  pm.expect(pm.response.code, 'failed: ' + responseText).to.be.below(400);",
+              "});",
+              "pm.test('speech-stream response is SSE', function () {",
+              "  pm.expect((pm.response.headers.get('Content-Type') || '').toLowerCase()).to.include('text/event-stream');",
+              "});",
+              "pm.test('speech-stream contains only valid JSON events and no stream error', function () {",
+              "  pm.expect(invalidEvents, 'invalid SSE data: ' + invalidEvents.join(' | ')).to.be.empty;",
+              "  pm.expect(streamErrors, 'stream errors: ' + JSON.stringify(streamErrors)).to.be.empty;",
+              "});",
+              "pm.test('speech-stream returns non-empty decodable inlineData audio', function () {",
+              "  pm.expect(audioParts.length, 'body: ' + responseText.slice(0, 1000)).to.be.above(0);",
+              "  pm.expect(decodedBytes, 'audio chunks did not decode').to.be.above(0);",
+              "});",
+              "pm.test('speech-stream preserves the provider audio MIME type', function () {",
+              "  pm.expect(mimeTypes.length, 'no MIME metadata found').to.eql(audioParts.length);",
+              "  mimeTypes.forEach(function (mime) { pm.expect(mime).to.eql(expectedMime); });",
+              "});",
+              "pm.test('speech-stream terminates with STOP', function () {",
+              "  pm.expect(finishReasons, 'finish reasons: ' + JSON.stringify(finishReasons)).to.include('STOP');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "gemini/gemini-2.5-flash-preview-tts /genai normal speech stream returns PCM inlineData - speech-stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "{{genaiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [{ \"text\": \"Say exactly: Bifrost speech test.\" }]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseModalities\": [\"AUDIO\"],\n    \"speechConfig\": {\n      \"voiceConfig\": {\n        \"prebuiltVoiceConfig\": { \"voiceName\": \"Kore\" }\n      }\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/gemini-2.5-flash-preview-tts:streamGenerateContent?alt=sse",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "gemini-2.5-flash-preview-tts:streamGenerateContent"
+              ],
+              "query": [
+                {
+                  "key": "alt",
+                  "value": "sse"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "openai/gpt-4o-mini-tts /genai criss-cross speech stream returns MP3 inlineData - speech-stream",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [{ \"text\": \"Say exactly: Bifrost speech test.\" }]\n    }\n  ],\n  \"generationConfig\": {\n    \"responseModalities\": [\"AUDIO\"],\n    \"speechConfig\": {\n      \"voiceConfig\": {\n        \"prebuiltVoiceConfig\": { \"voiceName\": \"alloy\" }\n      }\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/genai/v1beta/models/openai/gpt-4o-mini-tts:streamGenerateContent?alt=sse",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "genai",
+                "v1beta",
+                "models",
+                "openai",
+                "gpt-4o-mini-tts:streamGenerateContent"
+              ],
+              "query": [
+                {
+                  "key": "alt",
+                  "value": "sse"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "97. OpenRouter non-Claude models reject prompt_cache_breakpoint (PR #6692 regression)",
+      "description": "Regression coverage for the PR #6692 follow-up (https://github.com/maximhq/bifrost/pull/6692#issuecomment-5711483907): Claude Code + OpenRouter + GPT models broke in v2.1.0.\n\nProduction path: /anthropic/v1/messages -> Bifrost Responses request -> OpenRouterProvider.Responses -> ToOpenAIResponsesRequest -> POST {OpenRouter}/v1/responses.\n\nresponsesUsesPromptCacheBreakpoints returned true for every OpenRouter model, so every cache_control marker became prompt_cache_breakpoint. OpenRouter converts that back into an Anthropic breakpoint for Claude (folder 69), but forwards it verbatim to OpenAI/Azure for GPT models, and pre-5.6 GPT upstreams reject it: 400 \"prompt_cache_breakpoint is not supported on this model\". Claude Code sends cache_control on nearly every request, so the route was unusable.\n\nThe gate is now the datasheet flag supports_prompt_cache_breakpoints, falling back to Claude or gpt-5.6 on OpenRouter when the row is silent.\n\nWhat each case pins:\n  97.1 the Claude Code route (/anthropic/v1/messages) with gpt-5.4: 2xx and no breakpoint on the wire.\n  97.2 the native /v1/responses route with gpt-5.4: same invariant, independent of the Anthropic integration.\n  97.3 the streaming handler with gpt-5.4: no upstream rejection in the SSE stream.\n  97.4 control: gpt-5.6 on OpenRouter still receives breakpoints (the field is supported there), so the gate is not over-dropping.\n  97.5/97.6 gpt-6-astra on /v1/responses and the Claude Code route. The name-based fallback does not match gpt-6, so the breakpoint only appears if the datasheet row sets supports_prompt_cache_breakpoints: true; a missing row degrades to a silent 2xx cache miss, which these cases catch.\n\nFolder 13 covers OpenRouter cache_control on Chat Completions only, which never hits this translation.",
+      "item": [
+        {
+          "name": "OpenRouter OpenAI gpt-5.4 anthropic messages: cache_control yields no prompt_cache_breakpoint - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('97.1 2xx - a 400 \"prompt_cache_breakpoint is not supported on this model\" is the regression', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.1 raw_request captured', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "pm.test('97.1 no prompt_cache_breakpoint synthesized for a non-Claude, pre-5.6 OpenRouter model', function () {",
+                  "  pm.expect(inp.indexOf('prompt_cache_breakpoint'), 'upstream rejects the field: ' + inp.slice(0, 500)).to.equal(-1);",
+                  "});",
+                  "pm.test('97.1 cache_control is stripped, not forwarded', function () {",
+                  "  pm.expect(inp.indexOf('cache_control'), inp.slice(0, 500)).to.equal(-1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-5.4\",\n  \"max_tokens\": 16,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"You are a meticulous assistant. Answer tersely.\",\n      \"cache_control\": {\n        \"type\": \"ephemeral\"\n      }\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"Reply with OK.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenRouter OpenAI gpt-5.4 responses: cache_control yields no prompt_cache_breakpoint - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('97.2 2xx - a 400 \"prompt_cache_breakpoint is not supported on this model\" is the regression', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.2 raw_request captured', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "pm.test('97.2 no prompt_cache_breakpoint synthesized for a non-Claude, pre-5.6 OpenRouter model', function () {",
+                  "  pm.expect(inp.indexOf('prompt_cache_breakpoint'), 'upstream rejects the field: ' + inp.slice(0, 500)).to.equal(-1);",
+                  "});",
+                  "pm.test('97.2 cache_control is stripped, not forwarded', function () {",
+                  "  pm.expect(inp.indexOf('cache_control'), inp.slice(0, 500)).to.equal(-1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-5.4\",\n  \"max_output_tokens\": 16,\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"You are a meticulous assistant. Answer tersely.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        },\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with OK.\"\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenRouter OpenAI gpt-5.4 responses streaming: cache_control is not rejected upstream - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "var txt = pm.response.text();",
+                  "pm.test('97.3 streaming 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + txt).to.be.below(400);",
+                  "});",
+                  "pm.test('97.3 stream carries no prompt_cache_breakpoint rejection', function () {",
+                  "  pm.expect(txt.indexOf('prompt_cache_breakpoint'), txt.slice(0, 800)).to.equal(-1);",
+                  "});",
+                  "pm.test('97.3 stream completed', function () {",
+                  "  pm.expect(txt.indexOf('response.completed'), txt.slice(-800)).to.be.above(-1);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "// The terminal response.completed event carries extra_fields.raw_request when x-bf-send-back-raw-request is set.",
+                  "var rr = null;",
+                  "txt.split('\\n').forEach(function (l) {",
+                  "  if (l.indexOf('data:') !== 0) { return; }",
+                  "  var ev; try { ev = JSON.parse(l.slice(5)); } catch (e) { return; }",
+                  "  if (ev && ev.type === 'response.completed' && ev.extra_fields && ev.extra_fields.raw_request) { rr = ev.extra_fields.raw_request; }",
+                  "});",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.3 raw_request captured on response.completed', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored on the stream').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "pm.test('97.3 no prompt_cache_breakpoint synthesized on the streaming wire', function () {",
+                  "  pm.expect(inp.indexOf('prompt_cache_breakpoint'), inp.slice(0, 500)).to.equal(-1);",
+                  "});",
+                  "pm.test('97.3 cache_control is stripped, not forwarded, on the streaming wire', function () {",
+                  "  pm.expect(inp.indexOf('cache_control'), inp.slice(0, 500)).to.equal(-1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-5.4\",\n  \"max_output_tokens\": 16,\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"You are a meticulous assistant. Answer tersely.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        },\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with OK.\"\n        }\n      ]\n    }\n  ],\n  \"stream\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenRouter OpenAI gpt-5.6 responses: control - breakpoint still sent where supported - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('97.4 2xx - a 400 \"prompt_cache_breakpoint is not supported on this model\" is the regression', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.4 raw_request captured', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "var blk = ((((rr.input || [])[0] || {}).content || [])[0]) || {};",
+                  "pm.test('97.4 marked input_text carries prompt_cache_breakpoint mode=explicit', function () {",
+                  "  pm.expect(blk.prompt_cache_breakpoint, 'input[0].content[0]: ' + JSON.stringify(blk).slice(0, 400)).to.be.an('object');",
+                  "  pm.expect((blk.prompt_cache_breakpoint || {}).mode).to.eql('explicit');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-5.6\",\n  \"max_output_tokens\": 16,\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"You are a meticulous assistant. Answer tersely.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        },\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with OK.\"\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenRouter OpenAI gpt-6-astra responses: datasheet enables prompt_cache_breakpoint - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('97.5 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.5 raw_request captured', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "// gpt-6-astra is not matched by the name-based fallback (Claude or gpt-5.6), so a breakpoint here can only come from the datasheet row.",
+                  "pm.test('97.5 prompt_cache_breakpoint sent - fails if the datasheet row lacks supports_prompt_cache_breakpoints: true', function () {",
+                  "  pm.expect(inp.indexOf('\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}'), 'no breakpoint on the wire, cache_control was silently stripped: ' + inp.slice(0, 500)).to.be.above(-1);",
+                  "});",
+                  "pm.test('97.5 cache_control is translated, not forwarded', function () {",
+                  "  pm.expect(inp.indexOf('cache_control'), inp.slice(0, 500)).to.equal(-1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-6-astra\",\n  \"max_output_tokens\": 16,\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"You are a meticulous assistant. Answer tersely.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        },\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Reply with OK.\"\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/responses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "responses"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenRouter OpenAI gpt-6-astra anthropic messages: datasheet enables prompt_cache_breakpoint - #6692",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('97.6 2xx', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "if (pm.response.code >= 400) { return; }",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (e) { rr = null; } }",
+                  "pm.test('97.6 raw_request captured', function () {",
+                  "  pm.expect(rr, 'raw_request missing - x-bf-send-back-raw-request not honored').to.be.an('object');",
+                  "});",
+                  "if (!rr || typeof rr !== 'object') { return; }",
+                  "var inp = JSON.stringify(rr.input || []);",
+                  "// gpt-6-astra is not matched by the name-based fallback (Claude or gpt-5.6), so a breakpoint here can only come from the datasheet row.",
+                  "pm.test('97.6 prompt_cache_breakpoint sent - fails if the datasheet row lacks supports_prompt_cache_breakpoints: true', function () {",
+                  "  pm.expect(inp.indexOf('\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}'), 'no breakpoint on the wire, cache_control was silently stripped: ' + inp.slice(0, 500)).to.be.above(-1);",
+                  "});",
+                  "pm.test('97.6 cache_control is translated, not forwarded', function () {",
+                  "  pm.expect(inp.indexOf('cache_control'), inp.slice(0, 500)).to.equal(-1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openrouter/openai/gpt-6-astra\",\n  \"max_tokens\": 16,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"You are a meticulous assistant. Answer tersely.\",\n      \"cache_control\": {\n        \"type\": \"ephemeral\"\n      }\n    }\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"Reply with OK.\",\n          \"cache_control\": {\n            \"type\": \"ephemeral\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            }
+          }
+        }
+      ]
     }
   ]
 }
