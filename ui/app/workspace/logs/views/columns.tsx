@@ -475,8 +475,8 @@ export const createColumns = (
 				if (latency === undefined || latency === null) {
 					return <div className="pl-4 font-mono text-xs">N/A</div>;
 				}
-				const tone = latency >= 5000 ? "bg-chart-error" : latency >= 2000 ? "bg-chart-warning" : "bg-chart-success";
-				const pct = Math.min(100, (latency / 5000) * 100);
+				const tone = latency > 60000 ? "bg-chart-error" : latency > 30000 ? "bg-chart-warning" : "bg-chart-success";
+				const pct = Math.min(100, (latency / 60000) * 100);
 				return (
 					<div className="flex items-center gap-2 pl-4">
 						<span className="font-mono text-[12px] tabular-nums">{formatLatency(latency)}</span>
