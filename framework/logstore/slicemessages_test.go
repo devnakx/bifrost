@@ -155,6 +155,21 @@ func TestSliceLogMessages(t *testing.T) {
 	}
 }
 
+func TestSliceLogMessagesLatestFirst(t *testing.T) {
+	got, total, err := SliceLogMessagesLatestFirst(chatLog(), 0, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("total = %d, want 4", total)
+	}
+	for i, sub := range []string{"output-3", "user-2"} {
+		if !contains(string(got[i]), sub) {
+			t.Errorf("message %d body %s missing %q", i, got[i], sub)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
 }

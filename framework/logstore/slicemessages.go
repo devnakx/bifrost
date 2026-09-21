@@ -18,6 +18,15 @@ import (
 //   - offset < 0 归一化为 0；offset >= total 返回空切片、总数与 nil error（不视为错误）
 //   - limit <= 0 视为非法输入返回 error，默认值由调用方决定，本函数不做兜底
 func SliceLogMessages(l *Log, offset, limit int) ([]json.RawMessage, int, error) {
+	return sliceLogMessages(l, offset, limit, false)
+}
+
+// SliceLogMessagesLatestFirst returns the same message sequence with the newest message first.
+func SliceLogMessagesLatestFirst(l *Log, offset, limit int) ([]json.RawMessage, int, error) {
+	return sliceLogMessages(l, offset, limit, true)
+}
+
+func sliceLogMessages(l *Log, offset, limit int, latestFirst bool) ([]json.RawMessage, int, error) {
 	if l == nil {
 		return nil, 0, fmt.Errorf("logstore: log is nil")
 	}
@@ -50,6 +59,11 @@ func SliceLogMessages(l *Log, offset, limit int) ([]json.RawMessage, int, error)
 	}
 
 	total := len(messages)
+	if latestFirst {
+		for left, right := 0, total-1; left < right; left, right = left+1, right-1 {
+			messages[left], messages[right] = messages[right], messages[left]
+		}
+	}
 	if offset >= total {
 		return []json.RawMessage{}, total, nil
 	}
