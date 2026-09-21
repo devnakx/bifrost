@@ -504,7 +504,7 @@ export const logsApi = baseApi.injectEndpoints({
 			},
 			query: ({ queryArg, pageParam }) => ({
 				url: `/logs/${encodeURIComponent(queryArg)}/messages`,
-				params: { offset: pageParam, limit: 20 },
+				params: { offset: pageParam, limit: 20, order: "desc" },
 			}),
 			providesTags: (_result, _error, id) => [{ type: "LogMessages", id }],
 		}),

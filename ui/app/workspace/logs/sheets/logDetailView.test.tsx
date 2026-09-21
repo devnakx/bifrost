@@ -98,4 +98,20 @@ describe("LogDetailView 去门控骨架屏", () => {
 		// 不应有整屏空白：至少包含 Details / Routing / Plugin 等 Tab 结构
 		expect(html).toContain("Plugin Logs");
 	});
+
+	it("分页消息按最新消息优先展示", () => {
+		const log = makeListRowFixture();
+		const html = renderToString(
+			createElement(LogDetailView, {
+				log,
+				paginatedMessages: [
+					{ role: "assistant", content: "newer message" },
+					{ role: "user", content: "older message" },
+				],
+				hasMoreMessages: false,
+			}),
+		);
+
+		expect(html.indexOf("newer message")).toBeLessThan(html.indexOf("older message"));
+	});
 });
