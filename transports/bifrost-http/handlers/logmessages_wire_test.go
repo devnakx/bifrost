@@ -29,6 +29,10 @@ type messagesWireResp struct {
 }
 
 func doGetMessages(t *testing.T, h *LoggingHandler, id string, offset, limit *int) (int, json.RawMessage) {
+	return doGetMessagesWithOrder(t, h, id, offset, limit, "")
+}
+
+func doGetMessagesWithOrder(t *testing.T, h *LoggingHandler, id string, offset, limit *int, order string) (int, json.RawMessage) {
 	t.Helper()
 	uri := fmt.Sprintf("/api/logs/%s/messages", id)
 	q := []string{}
@@ -37,6 +41,9 @@ func doGetMessages(t *testing.T, h *LoggingHandler, id string, offset, limit *in
 	}
 	if limit != nil {
 		q = append(q, fmt.Sprintf("limit=%d", *limit))
+	}
+	if order != "" {
+		q = append(q, "order="+order)
 	}
 	if len(q) > 0 {
 		uri += "?" + strings.Join(q, "&")
@@ -48,6 +55,28 @@ func doGetMessages(t *testing.T, h *LoggingHandler, id string, offset, limit *in
 	ctx.SetUserValue("id", id)
 	h.getLogMessages(ctx)
 	return ctx.Response.StatusCode(), ctx.Response.Body()
+}
+
+func TestGetLogMessages_Wire_DescendingPagination(t *testing.T) {
+	h, store := newMessagesWireFixture(t)
+	chatID, _, _ := newMixedLogFixture(t, store)
+
+	code, body := doGetMessagesWithOrder(t, h, chatID, intPtr(0), intPtr(20), "desc")
+	require.Equal(t, fasthttp.StatusOK, code)
+	firstPage := mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 45, firstPage.Total)
+	assert.Len(t, firstPage.Messages, 20)
+	assert.Contains(t, string(firstPage.Messages[0]), "chat-output")
+	assert.Contains(t, string(firstPage.Messages[1]), "chat-43")
+	assert.True(t, firstPage.HasMore)
+
+	code, body = doGetMessagesWithOrder(t, h, chatID, intPtr(40), intPtr(20), "desc")
+	require.Equal(t, fasthttp.StatusOK, code)
+	lastPage := mustUnmarshalMessagesWire(t, body)
+	assert.Len(t, lastPage.Messages, 5)
+	assert.Contains(t, string(lastPage.Messages[0]), "chat-04")
+	assert.Contains(t, string(lastPage.Messages[4]), "chat-00")
+	assert.False(t, lastPage.HasMore)
 }
 
 func mustUnmarshalMessagesWire(t *testing.T, body json.RawMessage) messagesWireResp {

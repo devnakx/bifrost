@@ -4,6 +4,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1105,6 +1106,11 @@ func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 		}
 		limit = i
 	}
+	order := string(ctx.QueryArgs().Peek("order"))
+	if order != "" && order != "asc" && order != "desc" {
+		SendError(ctx, fasthttp.StatusBadRequest, "invalid order")
+		return
+	}
 	log, err := h.logManager.GetLogMessagesPayload(ctx, id)
 	if err != nil {
 		if errors.Is(err, logstore.ErrNotFound) {
@@ -1114,7 +1120,13 @@ func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get log: %v", err))
 		return
 	}
-	messages, total, err := logstore.SliceLogMessages(log, offset, limit)
+	var messages []json.RawMessage
+	var total int
+	if order == "desc" {
+		messages, total, err = logstore.SliceLogMessagesLatestFirst(log, offset, limit)
+	} else {
+		messages, total, err = logstore.SliceLogMessages(log, offset, limit)
+	}
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
