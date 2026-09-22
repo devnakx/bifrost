@@ -121,12 +121,19 @@ export function LogDetailSheet({
 
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
-			<SheetContent data-testid="log-detail-sheet" className="border-secondary flex w-full flex-col gap-4 overflow-hidden border p-4 sm:max-w-[60%] md:p-8">
+			<SheetContent
+				data-testid="log-detail-sheet"
+				className="border-secondary flex w-full flex-col gap-4 overflow-hidden border p-4 sm:max-w-[60%] md:p-8 xl:max-w-[40%]"
+			>
 				<SheetTitle className="sr-only">Log details</SheetTitle>
 				<SheetDescription className="sr-only">
 					{isFullDataReady && displayLog ? `Details for log ${displayLog.id}` : "Log details"}
 				</SheetDescription>
-				<ScrollArea viewportRef={viewportRef} className="flex min-h-0 flex-1 flex-col" viewportClassName="flex-1 [&>div]:!block [&>div]:!min-w-0">
+				<ScrollArea
+					viewportRef={viewportRef}
+					className="flex min-h-0 flex-1 flex-col"
+					viewportClassName="flex-1 [&>div]:!block [&>div]:!min-w-0"
+				>
 					<LogDetailView
 						log={displayLog}
 						resolvedSelectedPromptName={resolvedSelectedPromptName}
