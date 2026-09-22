@@ -106,5 +106,11 @@ if [ $# -gt 1 ]; then
     parse_args "$@"
 fi
 
+# 优先使用 bifrost 二进制，回退到旧的 main 命名
+BIFROST_BIN=/app/bifrost
+if [ ! -x "$BIFROST_BIN" ]; then
+    BIFROST_BIN=/app/main
+fi
+
 # Build the command with environment variables and standard arguments
-exec /app/main -app-dir "$APP_DIR" -port "$APP_PORT" -host "$APP_HOST" -log-level "$LOG_LEVEL" -log-style "$LOG_STYLE"
+exec "$BIFROST_BIN" -app-dir "$APP_DIR" -port "$APP_PORT" -host "$APP_HOST" -log-level "$LOG_LEVEL" -log-style "$LOG_STYLE"
