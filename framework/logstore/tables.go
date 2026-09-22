@@ -927,9 +927,9 @@ func (l *Log) SerializeFields() error {
 	// list_preview 存最新一条预览，已有值则跳过，未命中 input-only 再回退全量摘要
 	if l.ListPreview == "" {
 		if s := l.BuildInputContentSummary(); s != "" {
-			l.ListPreview = s
+			l.ListPreview = truncateRunes(s, maxListPreviewChars)
 		} else {
-			l.ListPreview = l.BuildContentSummary()
+			l.ListPreview = truncateRunes(l.BuildContentSummary(), maxListPreviewChars)
 		}
 	}
 

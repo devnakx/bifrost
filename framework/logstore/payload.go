@@ -407,7 +407,7 @@ func MergePayloadFromJSON(l *Log, data []byte) error {
 	// reflects the correct data from object storage, not a potentially
 	// corrupted DB value (e.g. from client/server encoding mismatch).
 	l.ContentSummary = l.BuildContentSummary()
-	l.ListPreview = l.BuildInputContentSummary()
+	l.ListPreview = truncateRunes(l.BuildInputContentSummary(), maxListPreviewChars)
 	return nil
 }
 
@@ -504,9 +504,43 @@ func buildMCPToolInputPreview(l *MCPToolLog) string {
 	return ""
 }
 
+// reasoningListPreviewPlaceholder 是列表预览列中推理消息的统一占位：
+// 只要最新一条是推理消息（即使无摘要文本、有加密 reasoning 也算），
+// list_preview 都返回该占位；原文仍保留在 content_summary 全文列供搜索。
+const reasoningListPreviewPlaceholder = "Reasoning..."
+
+// hasChatReasoning 判定 Chat 消息是否存在推理内容
+func hasChatReasoning(msg *schemas.ChatMessage) bool {
+	if msg == nil || msg.ChatAssistantMessage == nil {
+		return false
+	}
+	if msg.Reasoning != nil && strings.TrimSpace(*msg.Reasoning) != "" {
+		return true
+	}
+	return len(msg.ReasoningDetails) > 0
+}
+
+// hasResponsesReasoning 判定 Responses 消息是否存在推理内容
+func hasResponsesReasoning(msg *schemas.ResponsesMessage) bool {
+	if msg == nil {
+		return false
+	}
+	if msg.Type != nil && *msg.Type == schemas.ResponsesMessageTypeReasoning && msg.ResponsesReasoning == nil {
+		return true
+	}
+	if msg.ResponsesReasoning == nil {
+		return false
+	}
+	if len(msg.ResponsesReasoning.Summary) > 0 {
+		return true
+	}
+	return msg.ResponsesReasoning.EncryptedContent != nil && strings.TrimSpace(*msg.ResponsesReasoning.EncryptedContent) != ""
+}
+
 // BuildInputContentSummary 提取最新一条可读消息，作为列表预览
-// user/assistant 文本与推理摘要三者优先级平等，按请求原始顺序返回最新一条可读消息：
-// 最后有 user 文本就显示 user，最后有 assistant 文本就显示 assistant，最后有推理摘要就显示推理摘要
+// user/assistant 文本与推理三者优先级平等，按请求原始顺序返回最新一条可读消息：
+// 最后有 user 文本就显示 user，最后有 assistant 文本就显示 assistant，最后是推理消息
+// 则统一返回 reasoningListPreviewPlaceholder 占位（不再返回真实推理摘要文本）
 func (l *Log) BuildInputContentSummary() string {
 	// Chat 形状：输入历史 + 单条输出，输出在时间上最晚。倒序扫描，
 	// 同一条消息内正文晚于推理，先判正文再判推理。
@@ -515,8 +549,8 @@ func (l *Log) BuildInputContentSummary() string {
 			if text := extractChatMessageText(l.OutputMessageParsed); text != "" {
 				return text
 			}
-			if text := chatReasoningPreview(l.OutputMessageParsed); text != nil && *text != "" {
-				return *text
+			if hasChatReasoning(l.OutputMessageParsed) {
+				return reasoningListPreviewPlaceholder
 			}
 		}
 		for i := len(l.InputHistoryParsed) - 1; i >= 0; i-- {
@@ -526,8 +560,8 @@ func (l *Log) BuildInputContentSummary() string {
 					return text
 				}
 			}
-			if text := chatReasoningPreview(msg); text != nil && *text != "" {
-				return *text
+			if hasChatReasoning(msg) {
+				return reasoningListPreviewPlaceholder
 			}
 		}
 	}
@@ -540,8 +574,8 @@ func (l *Log) BuildInputContentSummary() string {
 			if text := responsesReadableText(msg); text != "" {
 				return text
 			}
-			if text := lastResponsesMessageReasoningText(msg); text != "" {
-				return text
+			if hasResponsesReasoning(msg) {
+				return reasoningListPreviewPlaceholder
 			}
 		}
 		for i := len(l.ResponsesInputHistoryParsed) - 1; i >= 0; i-- {
@@ -549,8 +583,8 @@ func (l *Log) BuildInputContentSummary() string {
 			if text := responsesReadableText(msg); text != "" {
 				return text
 			}
-			if text := lastResponsesMessageReasoningText(msg); text != "" {
-				return text
+			if hasResponsesReasoning(msg) {
+				return reasoningListPreviewPlaceholder
 			}
 		}
 	}

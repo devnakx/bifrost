@@ -15,7 +15,7 @@ import (
 // 列表投影输入预览上限的行为钉子：超大单条 chat 输入消息在 SQL 读取阶段被替换为
 // 保留原 role 的最小合法占位消息；详情接口 FindByID 保持全量；realtime.turn 行豁免；
 // 列表投影已不下发 responses_input_history/responses_output，session 投影独立保留
-// 两列预览并继承同一上限；列表行携带 list_preview（最新一条，截断 512），
+// 两列预览并继承同一上限；列表行携带 list_preview（最新一条，截断 128 字符），
 // 全量可搜索文本保留在存储列 content_summary，由 content_search 直接过滤，不进入投影
 //
 // 占位文本在此以字面量固定而不引用实现常量，保证红态（常量尚未落地）可编译
@@ -320,7 +320,7 @@ func TestListPreview_EmptyFallbackToFullSummary(t *testing.T) {
 
 // TestListProjectionCarriesListPreviewNotFullText 列表行携带最新一条预览而不带全文：
 // 首条超长输入只存在于存储列，全文词仍可被 content_search 命中，列表行 ListPreview
-// 为最新输出且不超过 512 字节，ContentSummary 不进入投影
+// 为最新输出且不超过 128 字符，ContentSummary 不进入投影
 func TestListProjectionCarriesListPreviewNotFullText(t *testing.T) {
 	store := newProjectionTestStore(t)
 	ctx := context.Background()
@@ -345,7 +345,7 @@ func TestListProjectionCarriesListPreviewNotFullText(t *testing.T) {
 		},
 	}
 	require.NoError(t, entry.SerializeFields())
-	require.Greater(t, len(entry.ContentSummary), 512, "种子全文须超过截断阈值")
+	require.Greater(t, len(entry.ContentSummary), 128, "种子全文须超过截断阈值")
 	require.NoError(t, store.Create(ctx, entry))
 
 	result, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})
@@ -354,7 +354,7 @@ func TestListProjectionCarriesListPreviewNotFullText(t *testing.T) {
 	row := result.Logs[0]
 
 	assert.Equal(t, answer, row.ListPreview, "列表行须携带最新一条预览")
-	assert.LessOrEqual(t, len(row.ListPreview), 512, "预览须截断到 512 字节以内")
+	assert.LessOrEqual(t, len(row.ListPreview), 128, "预览须截断到 128 字符以内")
 	assert.Empty(t, row.ContentSummary, "列表行不得携带全文")
 
 	hit, err := store.SearchLogs(ctx, SearchFilters{ContentSearch: "t6fullmarker"}, PaginationOptions{Limit: 10})
@@ -364,7 +364,7 @@ func TestListProjectionCarriesListPreviewNotFullText(t *testing.T) {
 }
 
 // TestSessionProjectionCarriesListPreviewLikeList 会话行与列表行预览一致：
-// 短预览原样下发且全文不出投影，长预览截断到 512 字节以内
+// 短预览原样下发且全文不出投影，长预览截断到 128 字符以内
 func TestSessionProjectionCarriesListPreviewLikeList(t *testing.T) {
 	store := newProjectionTestStore(t)
 	ctx := context.Background()
@@ -391,7 +391,7 @@ func TestSessionProjectionCarriesListPreviewLikeList(t *testing.T) {
 		},
 	}
 	require.NoError(t, shortEntry.SerializeFields())
-	require.Greater(t, len(shortEntry.ContentSummary), 512, "种子全文须超过截断阈值")
+	require.Greater(t, len(shortEntry.ContentSummary), 128, "种子全文须超过截断阈值")
 	require.NoError(t, store.Create(ctx, shortEntry))
 
 	longAnswer := strings.Repeat("W", 2000)
@@ -425,7 +425,7 @@ func TestSessionProjectionCarriesListPreviewLikeList(t *testing.T) {
 	assert.Empty(t, short.ContentSummary, "会话行不得携带全文")
 
 	long := byID["t7-session-long-1"]
-	assert.LessOrEqual(t, len(long.ListPreview), 512, "会话行预览须截断到 512 字节以内")
+	assert.LessOrEqual(t, len(long.ListPreview), 128, "会话行预览须截断到 128 字符以内")
 	assert.Empty(t, long.ContentSummary, "会话行不得携带全文")
 
 	listed, err := store.SearchLogs(ctx, SearchFilters{}, PaginationOptions{Limit: 10})

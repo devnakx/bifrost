@@ -138,46 +138,29 @@ function getLastHumanChatInputText(log?: LogEntry): string {
 	return "";
 }
 
-// 预览里 reasoning 片段的最大字符数，超出以省略号截断
-const maxReasoningPreviewChars = 150;
+// 预览里 reasoning 存在时统一占位，不泄漏真实推理摘要
+const reasoningPreviewPlaceholder = "Reasoning...";
 
-// 截断 reasoning 文本，保持预览简短且能在单行单元格内区分不同 reasoning
-function truncatePreview(text: string, max = maxReasoningPreviewChars): string {
-	const trimmed = text.trim();
-	if (trimmed.length <= max) return trimmed;
-	return `${trimmed.slice(0, max)}…`;
+// 判断 Chat 消息是否携带推理（文本非空，或 reasoning_details 有条目即视为存在，覆盖加密-only 无文本的情况）
+function hasChatReasoningField(msg?: ChatMessage): boolean {
+	if (!msg) return false;
+	if (typeof msg.reasoning === "string" && msg.reasoning.trim()) return true;
+	if (Array.isArray(msg.reasoning_details) && msg.reasoning_details.length > 0) return true;
+	return false;
 }
 
-// 提取 Chat 消息上的 reasoning 文本（reasoning 字段或 reasoning_details 数组）
-function extractChatReasoningField(msg?: ChatMessage): string {
-	if (!msg) return "";
-	if (typeof msg.reasoning === "string" && msg.reasoning.trim()) {
-		return msg.reasoning.trim();
-	}
-	if (Array.isArray(msg.reasoning_details)) {
-		const parts = msg.reasoning_details
-			.map((d) => (typeof d?.text === "string" ? d.text : (d?.summary ?? "")))
-			.map((t) => (typeof t === "string" ? t.trim() : ""))
-			.filter(Boolean);
-		if (parts.length > 0) return parts.join("\n").trim();
-	}
-	return "";
-}
-
-// Chat：当前轮 reasoning，优先输出消息，回退输入历史里最后一条带 reasoning 的消息
-function getChatReasoningText(log?: LogEntry): string {
+// Chat：当前轮是否存在推理，优先输出消息，再倒序查输入历史
+function getHasChatReasoning(log?: LogEntry): boolean {
 	if (log?.output_message) {
-		const text = extractChatReasoningField(log.output_message);
-		if (text) return text;
+		if (hasChatReasoningField(log.output_message)) return true;
 	}
 	const history = log?.input_history;
 	if (history) {
 		for (let i = history.length - 1; i >= 0; i--) {
-			const text = extractChatReasoningField(history[i]);
-			if (text) return text;
+			if (hasChatReasoningField(history[i])) return true;
 		}
 	}
-	return "";
+	return false;
 }
 
 export function getRealtimeTurnMessages(log?: LogEntry): {
@@ -237,17 +220,19 @@ export function getMessage(log?: LogEntry) {
 		if (outputText) {
 			return outputText;
 		}
-		const reasoningText = getChatReasoningText(log);
-		const fallbackText = getLastHumanChatInputText(log);
-		if (reasoningText) {
-			const snippet = truncatePreview(reasoningText);
-			if (fallbackText) {
-				return `Reasoning: ${snippet}\n${fallbackText}`;
-			}
-			return `Reasoning: ${snippet}`;
+		if (getHasChatReasoning(log)) {
+			return reasoningPreviewPlaceholder;
 		}
+		const fallbackText = getLastHumanChatInputText(log);
 		if (fallbackText) {
 			return fallbackText;
+		}
+	} else if (log?.output_message) {
+		if (getChatOutputText(log)) {
+			return getChatOutputText(log);
+		}
+		if (getHasChatReasoning(log)) {
+			return reasoningPreviewPlaceholder;
 		}
 	}
 	if (log?.output_message) {

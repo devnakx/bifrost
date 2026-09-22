@@ -17,7 +17,7 @@ import (
 const (
 	defaultUploadWorkers       = 10
 	defaultUploadQueueSize     = 5000
-	maxContentSummaryBytes     = 512
+	maxListPreviewChars        = 128
 	defaultMaxUploadQueueBytes = 1 << 30 // 1 GiB
 )
 
@@ -262,9 +262,9 @@ func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 
 	idx := findLastUserMessageIndex(dbEntry.InputHistoryParsed)
 
-	// content_summary 存全量可搜索文本，不截断；list_preview 存最新一条预览，截断 512。
+	// content_summary 存全量可搜索文本，不截断；list_preview 存最新一条预览，截断 128 字符。
 	dbEntry.ContentSummary = dbEntry.BuildContentSummary()
-	dbEntry.ListPreview = truncateTag(dbEntry.BuildInputContentSummary(), maxContentSummaryBytes)
+	dbEntry.ListPreview = truncateRunes(dbEntry.BuildInputContentSummary(), maxListPreviewChars)
 
 	// Serialize last user message before ClearPayload zeros everything.
 	// Attachment payloads (base64 images/files/audio, media URLs) are replaced

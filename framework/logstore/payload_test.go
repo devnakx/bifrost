@@ -169,7 +169,7 @@ func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
 					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
 				}},
 			},
-			want: responsesReasoning,
+			want: reasoningListPreviewPlaceholder,
 		},
 		{
 			name: "later reasoning beats earlier assistant text",
@@ -182,7 +182,7 @@ func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
 					},
 				},
 			},
-			want: responsesReasoning,
+			want: reasoningListPreviewPlaceholder,
 		},
 		{
 			name: "later assistant text beats earlier reasoning",
@@ -206,7 +206,7 @@ func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
 					ResponsesReasoning: &schemas.ResponsesReasoning{Summary: []schemas.ResponsesReasoningSummary{{Text: responsesReasoning}}},
 				}},
 			},
-			want: responsesReasoning,
+			want: reasoningListPreviewPlaceholder,
 		},
 	}
 
@@ -215,6 +215,27 @@ func TestBuildInputContentSummaryUsesLastTextMessage(t *testing.T) {
 			assert.Equal(t, tt.want, tt.log.BuildInputContentSummary())
 		})
 	}
+}
+
+func TestBuildInputContentSummaryEncryptedOnlyReasoningReturnsPlaceholder(t *testing.T) {
+	encrypted := "enc-bytes"
+	chatLog := Log{
+		OutputMessageParsed: &schemas.ChatMessage{
+			Role: schemas.ChatMessageRoleAssistant,
+			ChatAssistantMessage: &schemas.ChatAssistantMessage{
+				ReasoningDetails: []schemas.ChatReasoningDetails{{Index: 0, Type: schemas.BifrostReasoningDetailsTypeEncrypted, Data: &encrypted}},
+			},
+		},
+	}
+	assert.Equal(t, reasoningListPreviewPlaceholder, chatLog.BuildInputContentSummary())
+
+	responsesLog := Log{
+		ResponsesOutputParsed: []schemas.ResponsesMessage{{
+			Type:               schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+			ResponsesReasoning: &schemas.ResponsesReasoning{EncryptedContent: &encrypted},
+		}},
+	}
+	assert.Equal(t, reasoningListPreviewPlaceholder, responsesLog.BuildInputContentSummary())
 }
 
 func TestTrimListPayloadPreviews(t *testing.T) {

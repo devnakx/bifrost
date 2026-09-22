@@ -288,8 +288,8 @@ func TestSerializeFieldsContentSummarySkipsSyntheticUserInput(t *testing.T) {
 }
 
 // TestSerializeFieldsContentSummaryPrefersLatestReasoning 锁住三者平等取最新：
-// 输出数组中推理摘要排在 assistant 文本之后时，list_preview 必须显示推理摘要
-// 而非回退到更早的文本；content_summary 含双段全量。
+// 输出数组中推理排在 assistant 文本之后时，list_preview 统一为 Reasoning...
+// 占位而非真实摘要；content_summary 含双段全量。
 func TestSerializeFieldsContentSummaryPrefersLatestReasoning(t *testing.T) {
 	assistantRole := schemas.ResponsesInputMessageRoleAssistant
 	assistantText := "已生成蓝色风格 Logo"
@@ -304,7 +304,7 @@ func TestSerializeFieldsContentSummaryPrefersLatestReasoning(t *testing.T) {
 	require.NoError(t, log.SerializeFields())
 	assert.Contains(t, log.ContentSummary, assistantText)
 	assert.Contains(t, log.ContentSummary, reasoningText)
-	assert.Equal(t, reasoningText, log.ListPreview)
+	assert.Equal(t, reasoningListPreviewPlaceholder, log.ListPreview)
 }
 
 // TestDeserializeFieldsCostBreakdownNilWhenNoCost: a row with no cost gets no

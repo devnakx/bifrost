@@ -55,9 +55,9 @@ func TestListSelectColumnsProjectionOutputTrimming(t *testing.T) {
 	require.NotContains(t, pgCols, "image_edit_input AS image_edit_input",
 		"postgres 投影不得原样透传 image_edit_input")
 
-	// 列表投影携带最新一条预览（截断 512），全文不进入投影：两方言一致
+	// 列表投影携带最新一条预览（截断 128 字符），全文不进入投影：两方言一致
 	for _, cols := range []string{pgCols, sqliteCols} {
-		require.Contains(t, cols, "substr(list_preview, 1, 512) AS list_preview",
+		require.Contains(t, cols, "substr(list_preview, 1, 128) AS list_preview",
 			"列表投影必须含 list_preview 截断表达式；当前长度 %d", len(cols))
 	}
 	for _, cols := range []string{pgCols, pgSessionCols, sqliteCols, sqliteSessionCols} {
@@ -285,7 +285,7 @@ func TestPostgresListProjectionEndToEndOutputPreview(t *testing.T) {
 	require.NotNil(t, chat.OutputMessageParsed.ChatAssistantMessage.Reasoning)
 	assert.Len(t, *chat.OutputMessageParsed.ChatAssistantMessage.Reasoning, maxListOutputPreviewRunes, "reasoning 同样截断")
 	assert.NotEmpty(t, chat.ListPreview, "chat 列表行须携带最新一条预览")
-	assert.LessOrEqual(t, len(chat.ListPreview), 512, "预览须截断到 512 字节以内")
+	assert.LessOrEqual(t, len(chat.ListPreview), 128, "预览须截断到 128 字符以内")
 	assert.Empty(t, chat.ContentSummary, "列表行不得携带全文")
 
 	edit := byID["pg-out-imageedit-1"]

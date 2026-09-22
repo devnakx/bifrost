@@ -126,7 +126,7 @@ describe("getMessage", () => {
 	});
 
 	it("prepends reasoning snippet when same last input but different reasoning", () => {
-		// 复现生产场景：两行末条 user/assistant 相同、reasoning 不同，content_summary 缺席时走 reasoning 分支
+		// 推理回退统一占位：两行末条输入相同、reasoning 不同时均返回固定占位，不泄漏摘要
 		const makeLog = (reasoningText: string) =>
 			({
 				object: "chat.completion",
@@ -142,9 +142,9 @@ describe("getMessage", () => {
 		const first = getMessage(makeLog("**Processing image reference**"));
 		const second = getMessage(makeLog("**Considering image generation**"));
 
-		expect(first).toBe("Reasoning: **Processing image reference**\n我将按同一材质生成三视图");
-		expect(second).toBe("Reasoning: **Considering image generation**\n我将按同一材质生成三视图");
-		expect(first).not.toBe(second);
+		expect(first).toBe("Reasoning...");
+		expect(second).toBe("Reasoning...");
+		expect(first).toBe(second);
 	});
 
 	it("ignores empty reasoning and falls back to last input", () => {

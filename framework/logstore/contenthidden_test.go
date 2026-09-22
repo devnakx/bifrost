@@ -218,9 +218,9 @@ func TestHybrid_ContentSummarySplitDualColumns(t *testing.T) {
 		Content: &schemas.ChatMessageContent{ContentStr: &longAnswer},
 	}
 	require.NoError(t, entry.SerializeFields())
-	wantPreview := truncateTag(entry.BuildInputContentSummary(), maxContentSummaryBytes)
-	require.Equal(t, 600, len(entry.BuildInputContentSummary()), "前置条件：最新一条预览超 512")
-	require.Equal(t, maxContentSummaryBytes, len(wantPreview))
+	wantPreview := truncateRunes(entry.BuildInputContentSummary(), maxListPreviewChars)
+	require.Equal(t, 600, len(entry.BuildInputContentSummary()), "前置条件：最新一条预览超 128 字符")
+	require.Equal(t, maxListPreviewChars, len(wantPreview))
 
 	require.NoError(t, hybrid.Create(ctx, entry))
 
@@ -229,8 +229,8 @@ func TestHybrid_ContentSummarySplitDualColumns(t *testing.T) {
 	// 全量不被截断：双 transcript 完整落库
 	assert.Contains(t, dbRow.ContentSummary, longUser)
 	assert.Contains(t, dbRow.ContentSummary, longAnswer)
-	assert.Greater(t, len(dbRow.ContentSummary), maxContentSummaryBytes)
-	// 预览列截断 512，DB 行与回传入口一致
+	assert.Greater(t, len(dbRow.ContentSummary), maxListPreviewChars)
+	// 预览列截断 128 字符，DB 行与回传入口一致
 	assert.Equal(t, wantPreview, dbRow.ListPreview)
 	assert.Equal(t, wantPreview, entry.ListPreview)
 	assert.NotEmpty(t, entry.ContentSummary)
