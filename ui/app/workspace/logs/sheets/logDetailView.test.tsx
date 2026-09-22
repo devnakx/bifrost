@@ -91,7 +91,7 @@ describe("LogDetailView 去门控骨架屏", () => {
 		expect(html).not.toContain("logdetails-error-skeleton");
 		// 差异字段区块需有可接受回退 UI，不得无边界空白
 		// error_details 缺失但 status=error 时展示回退文案
-		expect(html).toContain("No error details available");
+		expect(html).toContain("The provider returned an error without a message.");
 		// 列表行自带字段仍正常
 		expect(html).toContain("gpt-4o-mini");
 		expect(html).toContain("Request details");
