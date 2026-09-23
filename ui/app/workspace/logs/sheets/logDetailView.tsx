@@ -3176,14 +3176,38 @@ export function LogDetailView({
 							</div>
 							<div className="space-y-3">
 								{(paginatedMessages as PaginatedMessage[]).map((msg: PaginatedMessage, idx: number) => {
-									const isChatLike = (msg as ChatMessage) && typeof (msg as ChatMessage).role === "string";
+									// responses 消息也可能带 role（如 reasoning role=assistant），只看 role 会误判进 chat 分支
+									// 变成空 Assistant 气泡；带 responses 专有标记的优先走 responses 分支
+									const msgAny = msg as any;
+									const msgType = typeof msgAny?.type === "string" ? (msgAny.type as string) : undefined;
+									const isResponsesShaped =
+										(msgType !== undefined && msgType !== "message") ||
+										Array.isArray(msgAny?.summary) ||
+										typeof msgAny?.encrypted_content === "string" ||
+										typeof msgAny?.arguments === "string" ||
+										typeof msgAny?.call_id === "string" ||
+										typeof msgAny?.status === "string" ||
+										msgAny?.output !== undefined;
+									const isChatLike = !isResponsesShaped && (msg as ChatMessage) && typeof (msg as ChatMessage).role === "string";
 									if (isChatLike) {
 										const chatMsg = msg as ChatMessage;
 										const role = ((chatMsg.role as string) || "user") as MessageRole;
 										if (visibleRoles.size < 5 && !visibleRoles.has(role) && !(role === "assistant" && visibleRoles.has("assistant")))
 											return null;
-										const text = extractMessageText(chatMsg, activeInputRevealMapping) || extractMessageText(chatMsg, activeOutputRevealMapping);
+										const text =
+											extractMessageText(chatMsg, activeInputRevealMapping) || extractMessageText(chatMsg, activeOutputRevealMapping);
 										const reasoningText = extractChatReasoning(chatMsg, activeInputRevealMapping);
+										const chatHasPayload =
+											typeof chatMsg.content === "string"
+												? chatMsg.content.trim() !== ""
+												: (Array.isArray(chatMsg.content) && chatMsg.content.length > 0) ||
+													(chatMsg.tool_calls?.length ?? 0) > 0 ||
+													!!chatMsg.refusal ||
+													!!chatMsg.reasoning ||
+													(chatMsg.reasoning_details?.length ?? 0) > 0 ||
+													!!chatMsg.audio ||
+													(chatMsg.annotations?.length ?? 0) > 0;
+										if (!text && !reasoningText && !chatHasPayload) return null;
 										return (
 											<div key={idx}>
 												{reasoningText && (visibleRoles.has("reasoning") || visibleRoles.size === 5) ? (
@@ -3205,10 +3229,17 @@ export function LogDetailView({
 									const rRole = getResponsesRole(responsesMsg);
 									if (visibleRoles.size < 5 && !visibleRoles.has(rRole)) return null;
 									const text = extractResponsesText(responsesMsg, rRole === "reasoning" ? undefined : activeInputRevealMapping);
+									if (rRole === "assistant" && !text) return null;
 									const reasoning = rRole === "reasoning" ? extractReasoningParts(responsesMsg, activeInputRevealMapping) : null;
-									const reasoningHasAny = !!reasoning && (reasoning.summaries.length > 0 || !!reasoning.encrypted || !!reasoning.contentText || reasoning.signatures.length > 0);
+									const reasoningHasAny =
+										!!reasoning &&
+										(reasoning.summaries.length > 0 || !!reasoning.encrypted || !!reasoning.contentText || reasoning.signatures.length > 0);
 									return (
-										<MessageRow key={idx} role={rRole} last={idx === (paginatedMessages as PaginatedMessage[]).length - 1 && !hasMoreMessages}>
+										<MessageRow
+											key={idx}
+											role={rRole}
+											last={idx === (paginatedMessages as PaginatedMessage[]).length - 1 && !hasMoreMessages}
+										>
 											{reasoning ? (
 												reasoningHasAny ? (
 													<div className="space-y-3">
@@ -3230,7 +3261,10 @@ export function LogDetailView({
 															</div>
 														) : null}
 														{reasoning.signatures.length > 0 ? (
-															<EncryptedReveal text={reasoning.signatures.join("\n\n")} label={reasoning.signatures.length > 1 ? "Encrypted signatures" : "Encrypted signature"} />
+															<EncryptedReveal
+																text={reasoning.signatures.join("\n\n")}
+																label={reasoning.signatures.length > 1 ? "Encrypted signatures" : "Encrypted signature"}
+															/>
 														) : null}
 													</div>
 												) : (
@@ -3965,7 +3999,6 @@ export function LogDetailView({
 						</div>
 					)}
 				</TabsContent>
-
 
 				<TabsContent value="plugins" className="space-y-3">
 					{isDetailMetaLoading ? (

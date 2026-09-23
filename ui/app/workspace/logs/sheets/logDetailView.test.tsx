@@ -114,4 +114,23 @@ describe("LogDetailView 去门控骨架屏", () => {
 
 		expect(html.indexOf("newer message")).toBeLessThan(html.indexOf("older message"));
 	});
+
+	it("responses 推理碎片 role=assistant 不再渲染为空 Assistant 气泡", () => {
+		const log = makeListRowFixture();
+		const html = renderToString(
+			createElement(LogDetailView, {
+				log,
+				paginatedMessages: [
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "real answer" }] },
+					{ type: "reasoning", role: "assistant", content: [], summary: [] },
+					{ type: "reasoning", content: [], summary: [] },
+					{ type: "message", role: "assistant", content: [] },
+				],
+				hasMoreMessages: false,
+			}),
+		);
+
+		expect(html).toContain("real answer");
+		expect(html).not.toContain(">assistant<");
+	});
 });
