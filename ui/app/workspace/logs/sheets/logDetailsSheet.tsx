@@ -123,7 +123,7 @@ export function LogDetailSheet({
 		<Sheet open={open} onOpenChange={onOpenChange}>
 			<SheetContent
 				data-testid="log-detail-sheet"
-				className="border-secondary flex w-full flex-col gap-4 overflow-hidden border p-4 sm:max-w-[60%] md:p-8 xl:max-w-[40%]"
+				className="border-secondary flex w-full flex-col gap-4 overflow-hidden border p-4 sm:max-w-[60%] md:p-8 2xl:max-w-[40%]"
 			>
 				<SheetTitle className="sr-only">Log details</SheetTitle>
 				<SheetDescription className="sr-only">
