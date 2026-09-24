@@ -4425,6 +4425,26 @@ func (bifrost *Bifrost) ReconnectMCPClient(id string) error {
 	return bifrost.MCPManager.ReconnectClient(id)
 }
 
+// RefreshMCPClientTools re-discovers an MCP client's tools from its upstream
+// server immediately, instead of waiting for the periodic connection
+// checker's next tick. Applies to every client type, including the per-call
+// ones ReconnectMCPClient rejects.
+//
+// Parameters:
+//   - ctx: Context bounding the discovery attempt
+//   - id: ID of the client to refresh
+//
+// Returns:
+//   - int: Number of tools the client is serving after the refresh
+//   - error: Any discovery error
+func (bifrost *Bifrost) RefreshMCPClientTools(ctx context.Context, id string) (int, error) {
+	if bifrost.MCPManager == nil {
+		return 0, fmt.Errorf("mcp is not configured in this bifrost instance")
+	}
+
+	return bifrost.MCPManager.RefreshClientTools(ctx, id)
+}
+
 // CloseAndMarkNeedsReauth closes a shared MCP client's live upstream
 // connection and flips it to needs_reauth, without attempting a new dial.
 // Used after OAuth credential rotation.
@@ -5448,6 +5468,11 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Trying fallback %d/%d: %s/%s (previous attempt failed: %s)", i+1, len(fallbacks), fallback.Provider, fallback.Model, routingErrorSummary(lastErr)))
 		ctx.SetValue(schemas.BifrostContextKeyFallbackRequestID, uuid.New().String())
 		clearCtxForFallback(ctx)
+		// Re-pin after the clear: RunPreRequestHooks, which commits a target's pin, runs once per request, not per fallback.
+		if keyID := strings.TrimSpace(fallback.KeyID); keyID != "" {
+			ctx.SetFallbackPinnedAPIKeyID(keyID)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Fallback %d/%d pinned to provider key %s", i+1, len(fallbacks), keyID))
+		}
 
 		// Start span for fallback attempt
 		tracer := bifrost.getTracer()
@@ -5600,6 +5625,11 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Trying fallback %d/%d: %s/%s (previous attempt failed: %s)", i+1, len(fallbacks), fallback.Provider, fallback.Model, routingErrorSummary(lastErr)))
 		ctx.SetValue(schemas.BifrostContextKeyFallbackRequestID, uuid.New().String())
 		clearCtxForFallback(ctx)
+		// Re-pin after the clear: RunPreRequestHooks, which commits a target's pin, runs once per request, not per fallback.
+		if keyID := strings.TrimSpace(fallback.KeyID); keyID != "" {
+			ctx.SetFallbackPinnedAPIKeyID(keyID)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Fallback %d/%d pinned to provider key %s", i+1, len(fallbacks), keyID))
+		}
 
 		// Start span for fallback attempt
 		tracer := bifrost.getTracer()
@@ -6586,7 +6616,7 @@ func executeRequestWithRetries[T any](
 		span.SetAttribute(schemas.AttrLegacyRequestType, string(requestType))
 
 		applyContextSpanAttributes(span, ctx)
-		span.SetAttribute(schemas.AttrBifrostRetries, attempts)
+		span.SetRetries(attempts)
 
 		// Surface caller-supplied extra headers (from x-bf-eh-* and direct-allowlist
 		// header forwarding) as span attributes so observability backends see the

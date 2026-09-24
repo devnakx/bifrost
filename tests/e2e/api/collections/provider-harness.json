@@ -59,7 +59,7 @@
           "// Only register the content-shape test when the request actually succeeded.",
           "// Otherwise newman reports it as passing (because of an early return) which is misleading next to a failing status.",
           "var __u = (pm.request && pm.request.url && pm.request.url.toString()) || '';",
-          "var __skipShape = (__u.indexOf('/files/') !== -1 && (__u.indexOf('/content?') !== -1 || __u.slice(-8) === '/content')) || __u.indexOf('storage.googleapis.com') !== -1 || __u.indexOf('batchPredictionJobs') !== -1 || (__u.indexOf('/genai/v1beta/batches/') !== -1 && __u.indexOf(':cancel') !== -1);",
+          "var __skipShape = __u.indexOf('/oauth2/') !== -1 || (__u.indexOf('/files/') !== -1 && (__u.indexOf('/content?') !== -1 || __u.slice(-8) === '/content')) || __u.indexOf('storage.googleapis.com') !== -1 || __u.indexOf('batchPredictionJobs') !== -1 || (__u.indexOf('/genai/v1beta/batches/') !== -1 && __u.indexOf(':cancel') !== -1);",
           "if (pm.response.code < 400 && !__skipShape && (pm.response.headers.get('content-type') || '').indexOf('text/event-stream') === -1 && (pm.response.headers.get('content-type') || '').indexOf('vnd.amazon.eventstream') === -1 && (pm.response.headers.get('content-type') || '').indexOf('audio/') === -1) {",
           "  pm.test('Response has content (text or tool_use)', function () {",
           "    var j;",
@@ -160109,7 +160109,231 @@
       ]
     },
     {
-      "name": "105. Typesafe decisions provider (typesafe-decisions)",
+      "name": "105. Routing fallback key pinning",
+      "description": "Creates a request-header-scoped routing rule using a pinned fallback followed by a legacy unpinned fallback. Before the change, the object fallback is rejected by the routing API. After the change, a missing pinned key must skip its attempt rather than silently selecting another key: success must come from fallback index 2. Covers JSON and SSE through the real routing and core retry paths. The temporary rule is deleted after each request. Requires management access (optional managementApiKey environment variable when authentication is enabled) and the configured OpenAI gpt-4o-mini provider. Known-key selection and restricted-write races have deterministic Go coverage.",
+      "item": [
+        {
+          "name": "openai gpt-4o-mini fallback key pinning non-streaming",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var marker = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.variables.set('fallbackPinMarker', marker);",
+                  "pm.variables.unset('fallbackPinRuleID');",
+                  "var headers = {'Content-Type': 'application/json'};",
+                  "var managementToken = pm.environment.get('managementApiKey') || pm.collectionVariables.get('managementApiKey');",
+                  "if (managementToken) { headers.Authorization = 'Bearer ' + managementToken; }",
+                  "var rule = {",
+                  "  name: 'harness-fallback-key-pin-' + marker,",
+                  "  enabled: true,",
+                  "  scope: 'global',",
+                  "  priority: Date.now() % 1000000000,",
+                  "  cel_expression: '\"x-fallback-pin-test\" in headers && headers[\"x-fallback-pin-test\"] == \"' + marker + '\"',",
+                  "  targets: [{provider: 'openai', model: 'bifrost-harness-nonexistent-primary', weight: 1}],",
+                  "  fallbacks: [",
+                  "    {provider: 'openai', model: 'gpt-4o-mini', key_id: '00000000-0000-4000-8000-000000000001'},",
+                  "    'openai/gpt-4o-mini'",
+                  "  ]",
+                  "};",
+                  "pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/routing/rules', method: 'POST', header: headers, body: {mode: 'raw', raw: JSON.stringify(rule)}}, function (err, response) {",
+                  "  if (response && [401, 403].indexOf(response.code) !== -1) {",
+                  "    pm.test.skip('fallback key pinning requires management access; set managementApiKey if needed');",
+                  "    pm.execution.skipRequest();",
+                  "    return;",
+                  "  }",
+                  "  pm.test('routing API accepts mixed pinned and legacy fallback entries', function () {",
+                  "    pm.expect(err).to.equal(null);",
+                  "    pm.expect(response.code, response.text()).to.equal(200);",
+                  "  });",
+                  "  if (err || response.code !== 200) { pm.execution.skipRequest(); return; }",
+                  "  var created = response.json().rule;",
+                  "  pm.variables.set('fallbackPinRuleID', created.id);",
+                  "  pm.test('routing API preserves the explicit fallback key ID', function () {",
+                  "    pm.expect(created.fallbacks[0].key_id).to.equal('00000000-0000-4000-8000-000000000001');",
+                  "    pm.expect(created.fallbacks[1]).to.equal('openai/gpt-4o-mini');",
+                  "  });",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ruleID = pm.variables.get('fallbackPinRuleID');",
+                  "if (ruleID) {",
+                  "  var headers = {};",
+                  "  var managementToken = pm.environment.get('managementApiKey') || pm.collectionVariables.get('managementApiKey');",
+                  "  if (managementToken) { headers.Authorization = 'Bearer ' + managementToken; }",
+                  "  pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/routing/rules/' + ruleID, method: 'DELETE', header: headers}, function (err, response) {",
+                  "    pm.test('temporary fallback key pinning rule is removed', function () {",
+                  "      pm.expect(err).to.equal(null);",
+                  "      pm.expect(response.code, response.text()).to.be.below(300);",
+                  "    });",
+                  "  });",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('unknown pinned fallback is skipped and the explicit unpinned fallback succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-routing-info-is-fallback')).to.equal('true');",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-fallback-index')).to.equal('2');",
+                  "});",
+                  "pm.test(\"chat completion returned\", function () { pm.expect(pm.response.json().choices).to.be.an(\"array\").that.is.not.empty; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-fallback-pin-test",
+                "value": "{{fallbackPinMarker}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply OK.\"\n    }\n  ],\n  \"max_tokens\": 8,\n  \"stream\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          }
+        },
+        {
+          "name": "openai gpt-4o-mini fallback key pinning streaming",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var marker = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.variables.set('fallbackPinMarker', marker);",
+                  "pm.variables.unset('fallbackPinRuleID');",
+                  "var headers = {'Content-Type': 'application/json'};",
+                  "var managementToken = pm.environment.get('managementApiKey') || pm.collectionVariables.get('managementApiKey');",
+                  "if (managementToken) { headers.Authorization = 'Bearer ' + managementToken; }",
+                  "var rule = {",
+                  "  name: 'harness-fallback-key-pin-' + marker,",
+                  "  enabled: true,",
+                  "  scope: 'global',",
+                  "  priority: Date.now() % 1000000000,",
+                  "  cel_expression: '\"x-fallback-pin-test\" in headers && headers[\"x-fallback-pin-test\"] == \"' + marker + '\"',",
+                  "  targets: [{provider: 'openai', model: 'bifrost-harness-nonexistent-primary', weight: 1}],",
+                  "  fallbacks: [",
+                  "    {provider: 'openai', model: 'gpt-4o-mini', key_id: '00000000-0000-4000-8000-000000000001'},",
+                  "    'openai/gpt-4o-mini'",
+                  "  ]",
+                  "};",
+                  "pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/routing/rules', method: 'POST', header: headers, body: {mode: 'raw', raw: JSON.stringify(rule)}}, function (err, response) {",
+                  "  if (response && [401, 403].indexOf(response.code) !== -1) {",
+                  "    pm.test.skip('fallback key pinning requires management access; set managementApiKey if needed');",
+                  "    pm.execution.skipRequest();",
+                  "    return;",
+                  "  }",
+                  "  pm.test('routing API accepts mixed pinned and legacy fallback entries', function () {",
+                  "    pm.expect(err).to.equal(null);",
+                  "    pm.expect(response.code, response.text()).to.equal(200);",
+                  "  });",
+                  "  if (err || response.code !== 200) { pm.execution.skipRequest(); return; }",
+                  "  var created = response.json().rule;",
+                  "  pm.variables.set('fallbackPinRuleID', created.id);",
+                  "  pm.test('routing API preserves the explicit fallback key ID', function () {",
+                  "    pm.expect(created.fallbacks[0].key_id).to.equal('00000000-0000-4000-8000-000000000001');",
+                  "    pm.expect(created.fallbacks[1]).to.equal('openai/gpt-4o-mini');",
+                  "  });",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ruleID = pm.variables.get('fallbackPinRuleID');",
+                  "if (ruleID) {",
+                  "  var headers = {};",
+                  "  var managementToken = pm.environment.get('managementApiKey') || pm.collectionVariables.get('managementApiKey');",
+                  "  if (managementToken) { headers.Authorization = 'Bearer ' + managementToken; }",
+                  "  pm.sendRequest({url: pm.variables.replaceIn('{{baseUrl}}') + '/api/routing/rules/' + ruleID, method: 'DELETE', header: headers}, function (err, response) {",
+                  "    pm.test('temporary fallback key pinning rule is removed', function () {",
+                  "      pm.expect(err).to.equal(null);",
+                  "      pm.expect(response.code, response.text()).to.be.below(300);",
+                  "    });",
+                  "  });",
+                  "}",
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('unknown pinned fallback is skipped and the explicit unpinned fallback succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-routing-info-is-fallback')).to.equal('true');",
+                  "  pm.expect(pm.response.headers.get('x-bifrost-fallback-index')).to.equal('2');",
+                  "});",
+                  "pm.test(\"stream completes\", function () { pm.expect(pm.response.text()).to.include(\"data: [DONE]\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-fallback-pin-test",
+                "value": "{{fallbackPinMarker}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply OK.\"\n    }\n  ],\n  \"max_tokens\": 8,\n  \"stream\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "106. Typesafe decisions provider (typesafe-decisions)",
       "item": [
         {
           "name": "/v1/decisions - mixed kinds return typed answers - typesafe/jev-1.13.0",
@@ -160370,7 +160594,7 @@
       ]
     },
     {
-      "name": "106. Decision LLM emulation and fallback (decision-llm-emulation)",
+      "name": "107. Decision LLM emulation and fallback (decision-llm-emulation)",
       "item": [
         {
           "name": "/v1/decisions - LLM emulates decision as primary - openai/gpt-4o-mini",
@@ -160584,7 +160808,7 @@
       ]
     },
     {
-      "name": "107. Decision emulation matrix - all providers (decision-emulation-matrix)",
+      "name": "108. Decision emulation matrix - all providers (decision-emulation-matrix)",
       "item": [
         {
           "name": "/v1/decisions - matches jev anchors - openai/gpt-5.6",
@@ -167271,6 +167495,721 @@
                 "responses"
               ]
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "112. OAuth2 Client-Controlled Field Lengths (RFC 6749 state/scope, RFC 7591 client_name/scope)",
+      "description": "Regression for a customer report: GET /oauth2/authorize rejected any state parameter longer than 512 characters with error=server_error (\"failed to create authorization request\"), because oauth2_authorize_requests.state was varchar(512). Postgres enforces that bound (SQLite does not), so a Gemini Enterprise connector sending a 620-char base64 JSON state could never complete per-user authorisation. The same class applied to every other client-controlled column on the OAuth2 AS tables: oauth2_clients.client_name and .scope (RFC 7591 section 2 bounds neither) and the scope columns on oauth2_authorize_requests and oauth2_refresh_tokens (RFC 6749 section 3.3), all varchar(255). All five are now text; the request header block (server.read_buffer_size) is the effective limit. Case 1 registers a public client via DCR with a 1024-char client_name and a 200-token scope, asserts both are echoed, and chains its client_id. Case 2 sends a 620-char state (the reported size) with scope omitted, so the long registered scope is what gets stored. Case 3 sends a 4096-char state plus the full long scope explicitly. Both pin that the authorize step reaches consent (302 to /oauth/consent?flow=) with no error= in the redirect; redirect following is disabled on those items so the 302 itself is asserted. No provider spend. Note: against the default SQLite-backed harness profile these cases are green both before and after the fix; the bounds only ever fired on Postgres. They pin the contract for Postgres-backed profiles and against any future explicit length validation on these fields.",
+      "item": [
+        {
+          "name": "oauth2 register public client with 1024-char client_name and 1693-char scope - oauth2 long fields",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('oauth2 dynamic client registration accepts long client_name and scope - oauth2 long fields', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.eql(201);",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body.client_id, 'client_id missing: ' + pm.response.text()).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.scope, 'scope not echoed verbatim').to.have.lengthOf(1693);",
+                  "  pm.collectionVariables.set('oauth2LongFieldsClientId', body.client_id);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"client_name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",\"redirect_uris\":[\"https://harness.example/cb\"],\"grant_types\":[\"authorization_code\"],\"response_types\":[\"code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"mcp read:0 read:1 read:2 read:3 read:4 read:5 read:6 read:7 read:8 read:9 read:10 read:11 read:12 read:13 read:14 read:15 read:16 read:17 read:18 read:19 read:20 read:21 read:22 read:23 read:24 read:25 read:26 read:27 read:28 read:29 read:30 read:31 read:32 read:33 read:34 read:35 read:36 read:37 read:38 read:39 read:40 read:41 read:42 read:43 read:44 read:45 read:46 read:47 read:48 read:49 read:50 read:51 read:52 read:53 read:54 read:55 read:56 read:57 read:58 read:59 read:60 read:61 read:62 read:63 read:64 read:65 read:66 read:67 read:68 read:69 read:70 read:71 read:72 read:73 read:74 read:75 read:76 read:77 read:78 read:79 read:80 read:81 read:82 read:83 read:84 read:85 read:86 read:87 read:88 read:89 read:90 read:91 read:92 read:93 read:94 read:95 read:96 read:97 read:98 read:99 read:100 read:101 read:102 read:103 read:104 read:105 read:106 read:107 read:108 read:109 read:110 read:111 read:112 read:113 read:114 read:115 read:116 read:117 read:118 read:119 read:120 read:121 read:122 read:123 read:124 read:125 read:126 read:127 read:128 read:129 read:130 read:131 read:132 read:133 read:134 read:135 read:136 read:137 read:138 read:139 read:140 read:141 read:142 read:143 read:144 read:145 read:146 read:147 read:148 read:149 read:150 read:151 read:152 read:153 read:154 read:155 read:156 read:157 read:158 read:159 read:160 read:161 read:162 read:163 read:164 read:165 read:166 read:167 read:168 read:169 read:170 read:171 read:172 read:173 read:174 read:175 read:176 read:177 read:178 read:179 read:180 read:181 read:182 read:183 read:184 read:185 read:186 read:187 read:188 read:189 read:190 read:191 read:192 read:193 read:194 read:195 read:196 read:197 read:198 read:199\"}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/oauth2/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "oauth2",
+                "register"
+              ]
+            }
+          }
+        },
+        {
+          "name": "oauth2 authorize with 620-char state redirects to consent, not server_error - oauth2 long fields",
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('620-char state accepted: 302 to consent - oauth2 long fields', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.eql(302);",
+                  "  var loc = pm.response.headers.get('Location') || '';",
+                  "  pm.expect(loc, 'Location: ' + loc).to.include('/oauth/consent?flow=');",
+                  "  pm.expect(loc, 'Location: ' + loc).to.not.include('error=');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/oauth2/authorize?client_id={{oauth2LongFieldsClientId}}&redirect_uri=https://harness.example/cb&response_type=code&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "oauth2",
+                "authorize"
+              ],
+              "query": [
+                {
+                  "key": "client_id",
+                  "value": "{{oauth2LongFieldsClientId}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "https://harness.example/cb"
+                },
+                {
+                  "key": "response_type",
+                  "value": "code"
+                },
+                {
+                  "key": "code_challenge",
+                  "value": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+                },
+                {
+                  "key": "code_challenge_method",
+                  "value": "S256"
+                },
+                {
+                  "key": "state",
+                  "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "oauth2 authorize with 4096-char state and 1693-char scope redirects to consent, not server_error - oauth2 long fields",
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('4096-char state and 1693-char scope accepted: 302 to consent - oauth2 long fields', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.eql(302);",
+                  "  var loc = pm.response.headers.get('Location') || '';",
+                  "  pm.expect(loc, 'Location: ' + loc).to.include('/oauth/consent?flow=');",
+                  "  pm.expect(loc, 'Location: ' + loc).to.not.include('error=');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/oauth2/authorize?client_id={{oauth2LongFieldsClientId}}&redirect_uri=https://harness.example/cb&response_type=code&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&scope=mcp read:0 read:1 read:2 read:3 read:4 read:5 read:6 read:7 read:8 read:9 read:10 read:11 read:12 read:13 read:14 read:15 read:16 read:17 read:18 read:19 read:20 read:21 read:22 read:23 read:24 read:25 read:26 read:27 read:28 read:29 read:30 read:31 read:32 read:33 read:34 read:35 read:36 read:37 read:38 read:39 read:40 read:41 read:42 read:43 read:44 read:45 read:46 read:47 read:48 read:49 read:50 read:51 read:52 read:53 read:54 read:55 read:56 read:57 read:58 read:59 read:60 read:61 read:62 read:63 read:64 read:65 read:66 read:67 read:68 read:69 read:70 read:71 read:72 read:73 read:74 read:75 read:76 read:77 read:78 read:79 read:80 read:81 read:82 read:83 read:84 read:85 read:86 read:87 read:88 read:89 read:90 read:91 read:92 read:93 read:94 read:95 read:96 read:97 read:98 read:99 read:100 read:101 read:102 read:103 read:104 read:105 read:106 read:107 read:108 read:109 read:110 read:111 read:112 read:113 read:114 read:115 read:116 read:117 read:118 read:119 read:120 read:121 read:122 read:123 read:124 read:125 read:126 read:127 read:128 read:129 read:130 read:131 read:132 read:133 read:134 read:135 read:136 read:137 read:138 read:139 read:140 read:141 read:142 read:143 read:144 read:145 read:146 read:147 read:148 read:149 read:150 read:151 read:152 read:153 read:154 read:155 read:156 read:157 read:158 read:159 read:160 read:161 read:162 read:163 read:164 read:165 read:166 read:167 read:168 read:169 read:170 read:171 read:172 read:173 read:174 read:175 read:176 read:177 read:178 read:179 read:180 read:181 read:182 read:183 read:184 read:185 read:186 read:187 read:188 read:189 read:190 read:191 read:192 read:193 read:194 read:195 read:196 read:197 read:198 read:199",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "oauth2",
+                "authorize"
+              ],
+              "query": [
+                {
+                  "key": "client_id",
+                  "value": "{{oauth2LongFieldsClientId}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "https://harness.example/cb"
+                },
+                {
+                  "key": "response_type",
+                  "value": "code"
+                },
+                {
+                  "key": "code_challenge",
+                  "value": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+                },
+                {
+                  "key": "code_challenge_method",
+                  "value": "S256"
+                },
+                {
+                  "key": "state",
+                  "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                },
+                {
+                  "key": "scope",
+                  "value": "mcp read:0 read:1 read:2 read:3 read:4 read:5 read:6 read:7 read:8 read:9 read:10 read:11 read:12 read:13 read:14 read:15 read:16 read:17 read:18 read:19 read:20 read:21 read:22 read:23 read:24 read:25 read:26 read:27 read:28 read:29 read:30 read:31 read:32 read:33 read:34 read:35 read:36 read:37 read:38 read:39 read:40 read:41 read:42 read:43 read:44 read:45 read:46 read:47 read:48 read:49 read:50 read:51 read:52 read:53 read:54 read:55 read:56 read:57 read:58 read:59 read:60 read:61 read:62 read:63 read:64 read:65 read:66 read:67 read:68 read:69 read:70 read:71 read:72 read:73 read:74 read:75 read:76 read:77 read:78 read:79 read:80 read:81 read:82 read:83 read:84 read:85 read:86 read:87 read:88 read:89 read:90 read:91 read:92 read:93 read:94 read:95 read:96 read:97 read:98 read:99 read:100 read:101 read:102 read:103 read:104 read:105 read:106 read:107 read:108 read:109 read:110 read:111 read:112 read:113 read:114 read:115 read:116 read:117 read:118 read:119 read:120 read:121 read:122 read:123 read:124 read:125 read:126 read:127 read:128 read:129 read:130 read:131 read:132 read:133 read:134 read:135 read:136 read:137 read:138 read:139 read:140 read:141 read:142 read:143 read:144 read:145 read:146 read:147 read:148 read:149 read:150 read:151 read:152 read:153 read:154 read:155 read:156 read:157 read:158 read:159 read:160 read:161 read:162 read:163 read:164 read:165 read:166 read:167 read:168 read:169 read:170 read:171 read:172 read:173 read:174 read:175 read:176 read:177 read:178 read:179 read:180 read:181 read:182 read:183 read:184 read:185 read:186 read:187 read:188 read:189 read:190 read:191 read:192 read:193 read:194 read:195 read:196 read:197 read:198 read:199"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "113. Anthropic Bedrock Request Metadata Passthrough (discussion #1731)",
+      "description": "Anthropic and PydanticAI messages ingress must preserve opted-in extra_params through Responses conversion into the outgoing Bedrock payload. Both cases fail before the fix because requestMetadata is absent from raw_request.",
+      "item": [
+        {
+          "name": "bedrock/{{bedrockModel}} anthropic request metadata passthrough",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('request metadata passthrough succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { rr = JSON.parse(rr); }",
+                  "pm.test('request metadata reaches Bedrock', function () {",
+                  "  pm.expect(rr, 'outgoing raw_request missing').to.be.an('object');",
+                  "  pm.expect(rr.requestMetadata).to.deep.equal({tenant_slug: 'test-tenant', trace_id: 'test-trace'});",
+                  "  pm.expect(rr).to.not.have.property('extra_params');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-passthrough-extra-params",
+                "value": "true"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "false"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"bedrock/{{bedrockModel}}\",\n  \"max_tokens\": 32,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with OK.\"\n    }\n  ],\n  \"extra_params\": {\n    \"requestMetadata\": {\n      \"tenant_slug\": \"test-tenant\",\n      \"trace_id\": \"test-trace\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/anthropic/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "anthropic",
+                "v1",
+                "messages"
+              ]
+            }
+          }
+        },
+        {
+          "name": "bedrock/{{bedrockModel}} pydanticai request metadata passthrough",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('request metadata passthrough succeeds', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "});",
+                  "var body = pm.response.json() || {};",
+                  "var rr = (body.extra_fields || {}).raw_request;",
+                  "if (typeof rr === 'string') { rr = JSON.parse(rr); }",
+                  "pm.test('request metadata reaches Bedrock', function () {",
+                  "  pm.expect(rr, 'outgoing raw_request missing').to.be.an('object');",
+                  "  pm.expect(rr.requestMetadata).to.deep.equal({tenant_slug: 'test-tenant', trace_id: 'test-trace'});",
+                  "  pm.expect(rr).to.not.have.property('extra_params');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-bf-passthrough-extra-params",
+                "value": "true"
+              },
+              {
+                "key": "x-bf-send-back-raw-request",
+                "value": "true"
+              },
+              {
+                "key": "x-bf-send-back-raw-response",
+                "value": "false"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"bedrock/{{bedrockModel}}\",\n  \"max_tokens\": 32,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with OK.\"\n    }\n  ],\n  \"extra_params\": {\n    \"requestMetadata\": {\n      \"tenant_slug\": \"test-tenant\",\n      \"trace_id\": \"test-trace\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pydanticai/v1/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "pydanticai",
+                "v1",
+                "messages"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "114. Raw Path Authorization (PR #5765)",
+      "description": "Opt-in auth-profile regression for GHSA-m82j-pr23-9hph and the analogous scoped-temp-token bypass. Run with provider_config/path-auth/config.json on an isolated fresh instance, INCLUDE_PREVIEW=1, PARALLEL=0 and FEATURE=raw-path-auth. The openai keyword is only a harness filter label; no provider calls are made. Cookies, inherited auth, and redirect following are disabled. Requires dashboard auth and mcp_enable_temp_token_auth. Whitelist probes use read-only GETs or invalid JSON, so a vulnerable handler cannot create provider/plugin configuration. Public OAuth registration/authorization creates only disposable client and consent-flow rows in the isolated test database. The successful consent GET proves the token is valid before testing scope escape. Every unexpected status fails. Run the whole folder in order, not individual rows.",
+      "item": [
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth dashboard auth precondition - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/config"
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth provider update traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/providers/..%2Fskills%2Fserve%2Fpath-auth-regression",
+            "body": {
+              "mode": "raw",
+              "raw": "{"
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth provider key traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/providers/..%2Fskills%2Fserve%2Fpath-auth-regression/keys",
+            "body": {
+              "mode": "raw",
+              "raw": "{"
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth provider read lowercase traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/providers/%2e%2e%2fskills%2fserve%2fpath-auth-regression?source=test"
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth plugin dev traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/plugins/..%2Fdev%2Fpath-auth-regression"
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-201] openai raw-path-auth register consent client - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.unset('pathAuthClient');",
+                  "pm.collectionVariables.unset('pathAuthFlow');",
+                  "pm.collectionVariables.unset('pathAuthToken');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(201);",
+                  "});",
+                  "pm.test('consent client created', function () {",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body.client_id).to.be.a('string').and.not.empty;",
+                  "  pm.collectionVariables.set('pathAuthClient', body.client_id);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/oauth2/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"client_name\":\"raw-path-auth regression\",\"redirect_uris\":[\"https://harness.example/cb\"],\"token_endpoint_auth_method\":\"none\"}"
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-302] openai raw-path-auth obtain consent token - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.expect(pm.collectionVariables.get('pathAuthClient'), 'consent client missing').to.be.a('string').and.not.empty;"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(302);",
+                  "});",
+                  "pm.test('redirect carries a scoped consent token', function () {",
+                  "  var location = pm.response.headers.get('Location') || '';",
+                  "  pm.expect(location).to.include('/oauth/consent?flow=');",
+                  "  pm.expect(location).not.to.include('error=');",
+                  "  var flow = location.match(/[?&]flow=([^&#]+)/);",
+                  "  var token = location.match(/#t=([^&]+)/);",
+                  "  pm.expect(flow, 'flow missing in redirect').not.to.equal(null);",
+                  "  pm.expect(token, 'token missing in redirect').not.to.equal(null);",
+                  "  pm.collectionVariables.set('pathAuthFlow', decodeURIComponent(flow[1]));",
+                  "  pm.collectionVariables.set('pathAuthToken', decodeURIComponent(token[1]));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/oauth2/authorize?client_id={{pathAuthClient}}&redirect_uri=https%3A%2F%2Fharness.example%2Fcb&response_type=code&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-200] openai raw-path-auth legitimate consent token control - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.expect(pm.collectionVariables.get('pathAuthToken'), 'run the entire raw-path-auth folder to obtain a valid token').to.be.a('string').and.not.empty;",
+                  "pm.expect(pm.collectionVariables.get('pathAuthFlow'), 'consent flow missing').to.be.a('string').and.not.empty;"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "});",
+                  "pm.test('valid token reaches its bound consent flow', function () {",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body.client_name).to.equal('raw-path-auth regression');",
+                  "  pm.expect(body.available_modes).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Bifrost-Temp-Token",
+                "value": "{{pathAuthToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/oauth2/consent/flows/{{pathAuthFlow}}"
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth scoped token provider traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.expect(pm.collectionVariables.get('pathAuthToken'), 'run the entire raw-path-auth folder to obtain a valid token').to.be.a('string').and.not.empty;",
+                  "pm.expect(pm.collectionVariables.get('pathAuthFlow'), 'consent flow missing').to.be.a('string').and.not.empty;"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bifrost-Temp-Token",
+                "value": "{{pathAuthToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/providers/..%2Foauth2%2Fconsent%2Fflows%2F{{pathAuthFlow}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{"
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] [EXPECT-401] openai raw-path-auth scoped token plugin traversal - #5765",
+          "protocolProfileBehavior": {
+            "followRedirects": false,
+            "disableCookies": true
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.expect(pm.collectionVariables.get('pathAuthToken'), 'run the entire raw-path-auth folder to obtain a valid token').to.be.a('string').and.not.empty;",
+                  "pm.expect(pm.collectionVariables.get('pathAuthFlow'), 'consent flow missing').to.be.a('string').and.not.empty;"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('raw-path-auth exact response status', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Bifrost-Temp-Token",
+                "value": "{{pathAuthToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/plugins/..%2Foauth2%2Fconsent%2Fflows%2F{{pathAuthFlow}}"
           }
         }
       ]
