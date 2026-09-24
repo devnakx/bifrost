@@ -1,23 +1,88 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createElement } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { renderToString } from "react-dom/server";
 // 避开真实 store / router 依赖，仅保留 LogDetailView 的纯渲染路径
 vi.mock("@/app/workspace/dashboard/utils/chartUtils", () => ({
 	formatCost: (v: number) => `$${v}`,
 	formatLatency: (v: number) => `${v}ms`,
 }));
-vi.mock("@/components/ui/accordion", () => ({ Accordion: ({children}:any)=> children, AccordionContent: ({children}:any)=> children, AccordionItem: ({children}:any)=> children, AccordionTrigger: ({children}:any)=> children }));
-vi.mock("@/components/ui/alertDialog", () => ({ AlertDialog: ({children}:any)=> children, AlertDialogAction: ({children}:any)=> children, AlertDialogCancel: ({children}:any)=> children, AlertDialogContent: ({children}:any)=> children, AlertDialogDescription: ({children}:any)=> children, AlertDialogFooter: ({children}:any)=> children, AlertDialogHeader: ({children}:any)=> children, AlertDialogTitle: ({children}:any)=> children, AlertDialogTrigger: ({children}:any)=> children }));
-vi.mock("@/components/ui/badge", () => ({ Badge: ({children}:any)=> children }));
-vi.mock("@/components/ui/button", () => ({ Button: ({children}:any)=> children }));
+vi.mock("@/components/ui/accordion", () => ({
+	Accordion: ({ children }: any) => children,
+	AccordionContent: ({ children }: any) => children,
+	AccordionItem: ({ children }: any) => children,
+	AccordionTrigger: ({ children }: any) => children,
+}));
+vi.mock("@/components/ui/alertDialog", () => ({
+	AlertDialog: ({ children }: any) => children,
+	AlertDialogAction: ({ children }: any) => children,
+	AlertDialogCancel: ({ children }: any) => children,
+	AlertDialogContent: ({ children }: any) => children,
+	AlertDialogDescription: ({ children }: any) => children,
+	AlertDialogFooter: ({ children }: any) => children,
+	AlertDialogHeader: ({ children }: any) => children,
+	AlertDialogTitle: ({ children }: any) => children,
+	AlertDialogTrigger: ({ children }: any) => children,
+}));
+vi.mock("@/components/ui/badge", () => ({ Badge: ({ children }: any) => children }));
+vi.mock("@/components/ui/button", () => ({ Button: ({ children }: any) => children }));
 vi.mock("@/components/ui/codeEditor", () => ({ CodeEditor: () => null }));
-vi.mock("@/components/ui/skeleton", () => ({ Skeleton: (props:any) => { const {className}=props; return require("react").createElement("div", {"data-slot":"skeleton", className}); } }));
-vi.mock("@/components/ui/dropdownMenu", () => ({ DropdownMenu: ({children}:any)=> children, DropdownMenuCheckboxItem: ({children}:any)=> children, DropdownMenuContent: ({children}:any)=> children, DropdownMenuItem: ({children}:any)=> children, DropdownMenuSeparator: () => null, DropdownMenuTrigger: ({children}:any)=> children }));
+vi.mock("@/components/ui/skeleton", () => ({
+	Skeleton: (props: any) => {
+		const { className } = props;
+		return require("react").createElement("div", { "data-slot": "skeleton", className });
+	},
+}));
+// renderToString 无法驱动 useState：mock 在渲染期按文本标签捕获菜单处理器，测试直接调用它们模拟用户交互
+const dropdownRegistry = vi.hoisted(() => ({
+	checkboxItems: [] as Array<{ label: string; checked: unknown; onCheckedChange: (checked: boolean) => void }>,
+	items: [] as Array<{
+		label: string;
+		disabled?: boolean;
+		onClick?: () => void;
+		onSelect?: (e: { preventDefault: () => void }) => void;
+	}>,
+	onOpenChange: undefined as undefined | ((open: boolean) => void),
+}));
+vi.mock("@/components/ui/dropdownMenu", () => {
+	const labelOf = (children: unknown): string =>
+		require("react")
+			.Children.toArray(children)
+			.filter((c: unknown) => typeof c === "string" || typeof c === "number")
+			.join("")
+			.trim();
+	return {
+		DropdownMenu: ({ children, onOpenChange }: any) => {
+			dropdownRegistry.onOpenChange = onOpenChange;
+			return children;
+		},
+		DropdownMenuCheckboxItem: ({ children, checked, onCheckedChange }: any) => {
+			dropdownRegistry.checkboxItems.push({ label: labelOf(children), checked, onCheckedChange });
+			return children;
+		},
+		DropdownMenuContent: ({ children }: any) => children,
+		DropdownMenuItem: ({ children, disabled, onClick, onSelect }: any) => {
+			dropdownRegistry.items.push({ label: labelOf(children), disabled, onClick, onSelect });
+			return children;
+		},
+		DropdownMenuSeparator: () => null,
+		DropdownMenuTrigger: ({ children }: any) => children,
+	};
+});
 vi.mock("@/components/ui/separator", () => ({ DottedSeparator: () => null }));
 vi.mock("@/components/ui/switch", () => ({ Switch: () => null }));
-vi.mock("@/components/ui/tabs", () => ({ Tabs: ({children}:any)=> children, TabsContent: ({children}:any)=> children, TabsList: ({children}:any)=> children, TabsTrigger: ({children}:any)=> children }));
-vi.mock("@/components/ui/tooltip", () => ({ Tooltip: ({children}:any)=> children, TooltipContent: ({children}:any)=> children, TooltipTrigger: ({children}:any)=> children }));
-vi.mock("@/components/ui/truncatedLabel", () => ({ TruncatedLabel: ({children}:any)=> children }));
+vi.mock("@/components/ui/tabs", () => ({
+	Tabs: ({ children }: any) => children,
+	TabsContent: ({ children }: any) => children,
+	TabsList: ({ children }: any) => children,
+	TabsTrigger: ({ children }: any) => children,
+}));
+vi.mock("@/components/ui/tooltip", () => ({
+	Tooltip: ({ children }: any) => children,
+	TooltipContent: ({ children }: any) => children,
+	TooltipTrigger: ({ children }: any) => children,
+}));
+vi.mock("@/components/ui/truncatedLabel", () => ({ TruncatedLabel: ({ children }: any) => children }));
 vi.mock("@/lib/store", () => ({
 	useGetUserAgentMappingsQuery: () => ({ data: { mappings: [] } }),
 	useGetProvidersQuery: () => ({ data: undefined, isLoading: false, isError: true }),
@@ -34,8 +99,16 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
-import { LogDetailView } from "./logDetailView";
+import { LogDetailView, isRoleDraftDirty, toggleRoleInDraft } from "./logDetailView";
 import type { LogEntry } from "@/lib/types/logs";
+import type { MessageRole } from "./logDetailView";
+
+function defaultRoleProps() {
+	return {
+		visibleRoles: new Set<MessageRole>(["user", "assistant"]),
+		setVisibleRoles: (() => {}) as Dispatch<SetStateAction<Set<MessageRole>>>,
+	};
+}
 
 // 列表行 shape——仅含 baseCols 预览列，缺失 error_details / params / plugin_logs 等差异字段
 function makeListRowFixture(overrides: Partial<LogEntry> = {}): LogEntry {
@@ -66,7 +139,9 @@ describe("LogDetailView 去门控骨架屏", () => {
 		const log = makeListRowFixture();
 		let html = "";
 		expect(() => {
-			html = renderToString(createElement(LogDetailView, { log, isMetaDataLoading: true, resolvedSelectedPromptName: "resolved-name" }));
+			html = renderToString(
+				createElement(LogDetailView, { log, isMetaDataLoading: true, resolvedSelectedPromptName: "resolved-name", ...defaultRoleProps() }),
+			);
 		}).not.toThrow();
 		// 骨架屏：差异字段区块
 		expect(html).toContain("logdetails-meta-skeleton");
@@ -84,7 +159,7 @@ describe("LogDetailView 去门控骨架屏", () => {
 		const log = makeListRowFixture({ status: "error", error_details: undefined as never });
 		let html = "";
 		expect(() => {
-			html = renderToString(createElement(LogDetailView, { log, isMetaDataLoading: false }));
+			html = renderToString(createElement(LogDetailView, { log, isMetaDataLoading: false, ...defaultRoleProps() }));
 		}).not.toThrow();
 		// isMetaDataLoading=false 时不应再展示骨架
 		expect(html).not.toContain("logdetails-meta-skeleton");
@@ -109,6 +184,7 @@ describe("LogDetailView 去门控骨架屏", () => {
 					{ role: "user", content: "older message" },
 				],
 				hasMoreMessages: false,
+				...defaultRoleProps(),
 			}),
 		);
 
@@ -127,10 +203,114 @@ describe("LogDetailView 去门控骨架屏", () => {
 					{ type: "message", role: "assistant", content: [] },
 				],
 				hasMoreMessages: false,
+				...defaultRoleProps(),
 			}),
 		);
 
 		expect(html).toContain("real answer");
 		expect(html).not.toContain(">assistant<");
+	});
+
+	it("developer 聊天消息按 system 角色过滤", () => {
+		const log = makeListRowFixture();
+		const renderWith = (roles: MessageRole[]) =>
+			renderToString(
+				createElement(LogDetailView, {
+					log,
+					paginatedMessages: [{ role: "developer", content: "sys prompt" }],
+					hasMoreMessages: false,
+					visibleRoles: new Set<MessageRole>(roles),
+					setVisibleRoles: (() => {}) as Dispatch<SetStateAction<Set<MessageRole>>>,
+				}),
+			);
+
+		expect(renderWith(["system"])).toContain("sys prompt");
+		expect(renderWith(["user", "assistant"])).not.toContain("sys prompt");
+	});
+});
+
+describe("LogDetailView 角色过滤草稿态", () => {
+	beforeEach(() => {
+		dropdownRegistry.checkboxItems = [];
+		dropdownRegistry.items = [];
+		dropdownRegistry.onOpenChange = undefined;
+	});
+
+	function renderRoleMenu(roles: MessageRole[], setVisibleRoles: Dispatch<SetStateAction<Set<MessageRole>>>) {
+		return renderToString(
+			createElement(LogDetailView, {
+				log: makeListRowFixture(),
+				paginatedMessages: [
+					{ role: "assistant", content: "newer message" },
+					{ role: "user", content: "older message" },
+				],
+				hasMoreMessages: false,
+				visibleRoles: new Set<MessageRole>(roles),
+				setVisibleRoles,
+			}),
+		);
+	}
+
+	function roleCheckbox(label: string) {
+		const item = dropdownRegistry.checkboxItems.find((entry) => entry.label === label);
+		expect(item).toBeDefined();
+		return item!;
+	}
+
+	function menuItem(label: string) {
+		const item = dropdownRegistry.items.find((entry) => entry.label === label);
+		expect(item).toBeDefined();
+		return item!;
+	}
+
+	it("勾选角色只改草稿：连续勾选 Reasoning、Tool 零请求，打开菜单重置也不提交", () => {
+		const setVisibleRoles = vi.fn();
+		renderRoleMenu(["user", "assistant"], setVisibleRoles as unknown as Dispatch<SetStateAction<Set<MessageRole>>>);
+		roleCheckbox("Reasoning").onCheckedChange(true);
+		roleCheckbox("Tool").onCheckedChange(true);
+		dropdownRegistry.onOpenChange?.(true);
+		expect(setVisibleRoles).not.toHaveBeenCalled();
+	});
+
+	it("Apply 一次提交合并集合", () => {
+		// renderToString 无法驱动 useState，草稿初值即 committed：以合并集合为初值验证 Apply 的转发语义；
+		// 勾选累积出合并草稿的过程由 toggleRoleInDraft 单测覆盖
+		const combined: MessageRole[] = ["user", "assistant", "reasoning", "tool"];
+		const setVisibleRoles = vi.fn();
+		renderRoleMenu(combined, setVisibleRoles as unknown as Dispatch<SetStateAction<Set<MessageRole>>>);
+		menuItem("Apply").onClick?.();
+		expect(setVisibleRoles).toHaveBeenCalledTimes(1);
+		expect(setVisibleRoles.mock.calls[0][0]).toEqual(new Set(combined));
+	});
+
+	it("Clear 只清空草稿不提交：保持菜单打开，Apply 才提交", () => {
+		const setVisibleRoles = vi.fn();
+		renderRoleMenu(["user", "assistant"], setVisibleRoles as unknown as Dispatch<SetStateAction<Set<MessageRole>>>);
+		const clear = menuItem("Clear");
+		const preventDefault = vi.fn();
+		clear.onSelect?.({ preventDefault });
+		expect(preventDefault).toHaveBeenCalledTimes(1);
+		clear.onClick?.();
+		expect(setVisibleRoles).not.toHaveBeenCalled();
+		// Apply 没有 onSelect 拦截，点击即关闭菜单并提交
+		expect(menuItem("Apply").onSelect).toBeUndefined();
+	});
+
+	it("草稿未改时 Apply 禁用", () => {
+		const setVisibleRoles = vi.fn();
+		renderRoleMenu(["user", "assistant"], setVisibleRoles as unknown as Dispatch<SetStateAction<Set<MessageRole>>>);
+		expect(menuItem("Apply").disabled).toBe(true);
+		expect(setVisibleRoles).not.toHaveBeenCalled();
+	});
+
+	it("toggleRoleInDraft 与 isRoleDraftDirty 语义", () => {
+		let draft = new Set<MessageRole>(["user", "assistant"]);
+		draft = toggleRoleInDraft(draft, "reasoning", true);
+		draft = toggleRoleInDraft(draft, "tool", true);
+		expect(draft).toEqual(new Set<MessageRole>(["user", "assistant", "reasoning", "tool"]));
+		expect(toggleRoleInDraft(draft, "tool", false)).toEqual(new Set<MessageRole>(["user", "assistant", "reasoning"]));
+		expect(isRoleDraftDirty(draft, new Set<MessageRole>(["user", "assistant"]))).toBe(true);
+		expect(isRoleDraftDirty(new Set<MessageRole>(["user", "assistant"]), new Set<MessageRole>(["user", "assistant"]))).toBe(false);
+		expect(isRoleDraftDirty(new Set<MessageRole>(), new Set<MessageRole>(["user", "assistant"]))).toBe(true);
 	});
 });

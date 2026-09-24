@@ -841,7 +841,22 @@ function CopyInlineButton({ text, testId }: { text: string; testId?: string }) {
 	);
 }
 
-type MessageRole = "system" | "user" | "assistant" | "reasoning" | "tool";
+export type MessageRole = "system" | "user" | "assistant" | "reasoning" | "tool";
+
+// 后端 roles 过滤把 developer 归为 system；chat 形态消息在过滤匹配时同样归一，展示标签保持原样
+export const normalizeChatRoleForFilter = (role: string): MessageRole => (role === "developer" ? "system" : (role as MessageRole));
+
+// 角色过滤菜单的草稿态纯逻辑：勾选只改本地草稿，点 Apply 才提交到 visibleRoles，避免每次勾选都触发 refetch
+export const toggleRoleInDraft = (prev: Set<MessageRole>, role: MessageRole, checked: boolean): Set<MessageRole> => {
+	const next = new Set(prev);
+	if (checked) next.add(role);
+	else next.delete(role);
+	return next;
+};
+
+// 草稿与已提交是否一致：大小与成员双向比较，决定 Apply 是否可用
+export const isRoleDraftDirty = (draft: Set<MessageRole>, committed: Set<MessageRole>): boolean =>
+	draft.size !== committed.size || [...draft].some((role) => !committed.has(role));
 const messageToneClass: Record<MessageRole, string> = {
 	system: "bg-zinc-50 border-zinc-200 dark:bg-zinc-900/40 dark:border-zinc-800",
 	user: "bg-blue-50/60 border-blue-200 dark:bg-blue-950/30 dark:border-blue-900",
@@ -1109,6 +1124,8 @@ interface LogDetailViewProps {
 	sentinelRef?: React.RefObject<HTMLDivElement | null>;
 	onLoadMore?: () => void;
 	onFilterBySessionId?: (sessionId: string) => void;
+	visibleRoles: Set<MessageRole>;
+	setVisibleRoles: React.Dispatch<React.SetStateAction<Set<MessageRole>>>;
 }
 
 // Explains an empty Raw JSON tab. Raw payloads are only persisted when the
@@ -1193,6 +1210,8 @@ export function LogDetailView({
 	sentinelRef,
 	onLoadMore,
 	onFilterBySessionId,
+	visibleRoles,
+	setVisibleRoles,
 }: LogDetailViewProps) {
 	// 字段级加载态：isMetaDataLoading 优先，缺省时回退至 loading 以兼容旧调用，避免双 loading 反模式
 	const isDetailMetaLoading = isMetaDataLoading ?? loading;
@@ -1201,6 +1220,8 @@ export function LogDetailView({
 		errorMessage: "Failed to copy request body",
 	});
 	const [showRevealedValues, setShowRevealedValues] = useState(false);
+	// 角色过滤菜单草稿：勾选只改本地 draft，Apply 才提交到 visibleRoles；打开菜单时从已提交重置，打开期间的外部更新不覆盖进行中的草稿
+	const [draftRoles, setDraftRoles] = useState<Set<MessageRole>>(visibleRoles);
 	// raw 懒加载：首次展开 raw tab 才请求
 	const [triggerRaw, { data: rawData, isFetching: isRawFetching }] = useLazyGetLogRawQuery();
 	const [triggerMessagesPage] = useLazyGetLogMessagesPageQuery();
@@ -1215,6 +1236,8 @@ export function LogDetailView({
 	const activeOutputRevealMapping = revealEnabled ? revealMapping?.output : undefined;
 	// 分页消息：当 paginatedMessages 有数据时优先展示（responses/chat 统一归一化）
 	const hasPaginatedMessages = Array.isArray(paginatedMessages) && paginatedMessages.length > 0;
+	// 导出沿用当前角色过滤：全选 5 个 = 全量（省略 roles），其余透传 CSV；order 与列表一致走 desc
+	const exportRoles = useMemo(() => (visibleRoles.size === 5 ? undefined : [...visibleRoles]), [visibleRoles]);
 	// raw 首次加载触发
 	const ensureRawFetched = () => {
 		if (!log?.id) return;
@@ -1232,8 +1255,6 @@ export function LogDetailView({
 	}, [log?.id, revealAvailable]);
 
 	const allRoles: MessageRole[] = ["system", "user", "assistant", "tool", "reasoning"];
-	// 默认仅展示用户与助手消息；系统/工具/推理等角色需手动开启
-	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set<MessageRole>(["user", "assistant"]));
 
 	const handleToggleReveal = (checked: boolean) => {
 		setShowRevealedValues(checked && revealAvailable);
@@ -1504,7 +1525,13 @@ export function LogDetailView({
 														}
 														while (hasMore) {
 															try {
-																const page = await triggerMessagesPage({ id: log.id, offset, limit: 100 }).unwrap();
+																const page = await triggerMessagesPage({
+																	id: log.id,
+																	offset,
+																	limit: 100,
+																	roles: exportRoles,
+																	order: "desc",
+																}).unwrap();
 																const msgs: unknown[] = page.messages ?? [];
 																if (allMessages.length === 0 && offset === 0) {
 																	allMessages = msgs;
@@ -3102,7 +3129,11 @@ export function LogDetailView({
 					)}
 					{/* Passthrough just renders the raw json, so there's nothing to filter */}
 					<div className={cn("flex justify-end", (log.content_hidden || isPassthrough) && "hidden")}>
-						<DropdownMenu>
+						<DropdownMenu
+							onOpenChange={(open) => {
+								if (open) setDraftRoles(new Set(visibleRoles));
+							}}
+						>
 							<DropdownMenuTrigger asChild>
 								<button
 									type="button"
@@ -3124,8 +3155,8 @@ export function LogDetailView({
 							</DropdownMenuTrigger>
 							<DropdownMenuContent align="end" className="w-48">
 								<DropdownMenuCheckboxItem
-									checked={visibleRoles.size === allRoles.length}
-									onCheckedChange={(checked) => setVisibleRoles(checked ? new Set(allRoles) : new Set())}
+									checked={draftRoles.size === allRoles.length}
+									onCheckedChange={(checked) => setDraftRoles(checked ? new Set(allRoles) : new Set())}
 									onSelect={(e) => e.preventDefault()}
 								>
 									Show all messages
@@ -3142,14 +3173,8 @@ export function LogDetailView({
 								).map(([role, label]) => (
 									<DropdownMenuCheckboxItem
 										key={role}
-										checked={visibleRoles.has(role)}
-										onCheckedChange={(checked) =>
-											setVisibleRoles((prev) => {
-												const next = new Set(prev);
-												checked ? next.add(role) : next.delete(role);
-												return next;
-											})
-										}
+										checked={draftRoles.has(role)}
+										onCheckedChange={(checked) => setDraftRoles((prev) => toggleRoleInDraft(prev, role, checked === true))}
 										// 阻止 Radix 默认的选中即关闭，仅点击菜单外或 Esc 才关闭
 										onSelect={(e) => e.preventDefault()}
 									>
@@ -3158,13 +3183,22 @@ export function LogDetailView({
 									</DropdownMenuCheckboxItem>
 								))}
 								<DropdownMenuSeparator />
-								<DropdownMenuItem
-									onClick={() => setVisibleRoles(new Set())}
-									onSelect={(e) => e.preventDefault()}
-									className="text-muted-foreground justify-center text-[12px]"
-								>
-									Clear all
-								</DropdownMenuItem>
+								<div className="flex items-center justify-between px-1 py-1">
+									<DropdownMenuItem
+										onClick={() => setDraftRoles(new Set())}
+										onSelect={(e) => e.preventDefault()}
+										className="text-muted-foreground text-[12px]"
+									>
+										Clear
+									</DropdownMenuItem>
+									<DropdownMenuItem
+										onClick={() => setVisibleRoles(new Set(draftRoles))}
+										disabled={!isRoleDraftDirty(draftRoles, visibleRoles)}
+										className="bg-primary text-primary-foreground focus:bg-primary focus:text-primary-foreground px-2.5 py-1 text-[12px] font-medium"
+									>
+										Apply
+									</DropdownMenuItem>
+								</div>
 							</DropdownMenuContent>
 						</DropdownMenu>
 					</div>
@@ -3192,8 +3226,8 @@ export function LogDetailView({
 									if (isChatLike) {
 										const chatMsg = msg as ChatMessage;
 										const role = ((chatMsg.role as string) || "user") as MessageRole;
-										if (visibleRoles.size < 5 && !visibleRoles.has(role) && !(role === "assistant" && visibleRoles.has("assistant")))
-											return null;
+										const filterRole = normalizeChatRoleForFilter((chatMsg.role as string) || "user");
+										if (visibleRoles.size < 5 && !visibleRoles.has(filterRole)) return null;
 										const text =
 											extractMessageText(chatMsg, activeInputRevealMapping) || extractMessageText(chatMsg, activeOutputRevealMapping);
 										const reasoningText = extractChatReasoning(chatMsg, activeInputRevealMapping);
@@ -3406,7 +3440,7 @@ export function LogDetailView({
 										(visibleRoles.size < allRoles.length
 											? log.input_history?.filter((m) => {
 													if (!m) return false;
-													const mainRole = ((m.role as string) || "user") as MessageRole;
+													const mainRole = normalizeChatRoleForFilter((m.role as string) || "user");
 													const hasReasoning = !!extractChatReasoning(m);
 													return visibleRoles.has(mainRole) || (hasReasoning && visibleRoles.has("reasoning"));
 												})
@@ -3416,7 +3450,7 @@ export function LogDetailView({
 										const text = extractMessageText(message, activeInputRevealMapping);
 										const reasoningText = extractChatReasoning(message, activeInputRevealMapping);
 										const showAll = visibleRoles.size === allRoles.length;
-										const showMain = showAll || visibleRoles.has(role);
+										const showMain = showAll || visibleRoles.has(normalizeChatRoleForFilter((message.role as string) || "user"));
 										const showReasoning = !!reasoningText && (showAll || visibleRoles.has("reasoning"));
 										const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 										const isOverallLast =

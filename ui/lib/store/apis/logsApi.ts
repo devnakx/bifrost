@@ -494,7 +494,7 @@ export const logsApi = baseApi.injectEndpoints({
 		}),
 
 		// Paginated messages for a log - infinite scroll (RTK 2.8.2 infiniteQuery)
-		getLogMessages: builder.infiniteQuery<LogMessagesResponse, string, number>({
+		getLogMessages: builder.infiniteQuery<LogMessagesResponse, { id: string; roles?: string[] }, number>({
 			infiniteQueryOptions: {
 				initialPageParam: 0,
 				getNextPageParam: (lastPage, _allPages, lastPageParam) => {
@@ -503,10 +503,15 @@ export const logsApi = baseApi.injectEndpoints({
 				},
 			},
 			query: ({ queryArg, pageParam }) => ({
-				url: `/logs/${encodeURIComponent(queryArg)}/messages`,
-				params: { offset: pageParam, limit: 20, order: "desc" },
+				url: `/logs/${encodeURIComponent(queryArg.id)}/messages`,
+				params: {
+					offset: pageParam,
+					limit: 20,
+					order: "desc",
+					...(queryArg.roles && queryArg.roles.length > 0 && queryArg.roles.length < 5 ? { roles: queryArg.roles.join(",") } : {}),
+				},
 			}),
-			providesTags: (_result, _error, id) => [{ type: "LogMessages", id }],
+			providesTags: (_result, _error, arg) => [{ type: "LogMessages", id: arg.id }],
 		}),
 
 		// Raw request/response + redaction mapping - lazy loaded on demand
@@ -516,13 +521,20 @@ export const logsApi = baseApi.injectEndpoints({
 		}),
 
 		// 单页消息查询（导出合并用，复用 baseQuery 鉴权链路）
-		getLogMessagesPage: builder.query<LogMessagesResponse, { id: string; offset: number; limit: number }>({
-			query: ({ id, offset, limit }) => ({
-				url: `/logs/${encodeURIComponent(id)}/messages`,
-				params: { offset, limit },
-			}),
-			providesTags: (_result, _error, arg) => [{ type: "LogMessages", id: arg.id }],
-		}),
+		getLogMessagesPage: builder.query<LogMessagesResponse, { id: string; offset: number; limit: number; roles?: string[]; order?: string }>(
+			{
+				query: ({ id, offset, limit, roles, order }) => ({
+					url: `/logs/${encodeURIComponent(id)}/messages`,
+					params: {
+						offset,
+						limit,
+						order: order ?? "desc",
+						...(roles && roles.length > 0 && roles.length < 5 ? { roles: roles.join(",") } : {}),
+					},
+				}),
+				providesTags: (_result, _error, arg) => [{ type: "LogMessages", id: arg.id }],
+			},
+		),
 	}),
 });
 

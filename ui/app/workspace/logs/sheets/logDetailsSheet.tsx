@@ -9,7 +9,7 @@ import type { LogEntry } from "@/lib/types/logs";
 import { useSheetNavigation } from "@/hooks/useSheetNavigation";
 import { Loader2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LogDetailView } from "./logDetailView";
+import { LogDetailView, type MessageRole } from "./logDetailView";
 
 interface LogDetailSheetProps {
 	log: LogEntry | null;
@@ -49,13 +49,18 @@ export function LogDetailSheet({
 		pollingInterval,
 	});
 
-	// 首屏消息分页（offset=0, limit=20）- 随 open/id 变化自动请求
+	// 角色过滤状态上提：默认仅 user/assistant；全选 5 个 = 全量（省略 roles）；切换后 queryArg 变化自动从 page 0 重取
+	const [visibleRoles, setVisibleRoles] = useState<Set<MessageRole>>(new Set<MessageRole>(["user", "assistant"]));
+	const messageRoles = useMemo(() => (visibleRoles.size === 5 ? undefined : [...visibleRoles]), [visibleRoles]);
+	const messagesQueryArg = useMemo(() => ({ id: log?.id ?? "", roles: messageRoles }), [log?.id, messageRoles]);
+
+	// 首屏消息分页（offset=0, limit=20）- 随 open/id/roles 变化自动请求
 	const {
 		data: messagesData,
 		fetchNextPage,
 		hasNextPage,
 		isFetchingNextPage,
-	} = useGetLogMessagesInfiniteQuery(log?.id ?? "", {
+	} = useGetLogMessagesInfiniteQuery(messagesQueryArg, {
 		skip: !open || !log?.id,
 	});
 
@@ -149,6 +154,8 @@ export function LogDetailSheet({
 						onLoadMore={() => {
 							if (hasNextPage && !isFetchingNextPage) fetchNextPage();
 						}}
+						visibleRoles={visibleRoles}
+						setVisibleRoles={setVisibleRoles}
 						onFilterBySessionId={onFilterBySessionId}
 						headerAction={
 							<>

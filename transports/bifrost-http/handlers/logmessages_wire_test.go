@@ -33,6 +33,10 @@ func doGetMessages(t *testing.T, h *LoggingHandler, id string, offset, limit *in
 }
 
 func doGetMessagesWithOrder(t *testing.T, h *LoggingHandler, id string, offset, limit *int, order string) (int, json.RawMessage) {
+	return doGetMessagesWithOrderAndRoles(t, h, id, offset, limit, order, "")
+}
+
+func doGetMessagesWithOrderAndRoles(t *testing.T, h *LoggingHandler, id string, offset, limit *int, order, roles string) (int, json.RawMessage) {
 	t.Helper()
 	uri := fmt.Sprintf("/api/logs/%s/messages", id)
 	q := []string{}
@@ -44,6 +48,9 @@ func doGetMessagesWithOrder(t *testing.T, h *LoggingHandler, id string, offset, 
 	}
 	if order != "" {
 		q = append(q, "order="+order)
+	}
+	if roles != "" {
+		q = append(q, "roles="+roles)
 	}
 	if len(q) > 0 {
 		uri += "?" + strings.Join(q, "&")
@@ -548,4 +555,54 @@ func TestGetLogMessages_Wire_FallbackEquivalence(t *testing.T) {
 			assert.Equal(t, string(r0.Messages[i]), string(r1.Messages[i]), "offset=%d idx=%d", off, i)
 		}
 	}
+}
+
+func TestGetLogMessages_Wire_RolesFilter(t *testing.T) {
+	h, store := newMessagesWireFixture(t)
+	chatID, _, _ := newMixedLogFixture(t, store)
+
+	code, body := doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "", "user")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r := mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 44, r.Total)
+	assert.Len(t, r.Messages, 20)
+	assert.True(t, r.HasMore)
+	assert.Contains(t, string(r.Messages[0]), "chat-00")
+
+	code, body = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "", "assistant")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r = mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 1, r.Total)
+	assert.Len(t, r.Messages, 1)
+	assert.Contains(t, string(r.Messages[0]), "chat-output")
+	assert.False(t, r.HasMore)
+
+	code, body = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "", "user,assistant")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r = mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 45, r.Total)
+	assert.Len(t, r.Messages, 20)
+	assert.True(t, r.HasMore)
+
+	code, body = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "", "system,user,assistant,tool,reasoning")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r = mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 45, r.Total)
+	assert.Len(t, r.Messages, 20)
+
+	code, body = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "desc", "user")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r = mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 44, r.Total)
+	assert.Contains(t, string(r.Messages[0]), "chat-43")
+
+	code, body = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(40), intPtr(20), "", "user")
+	require.Equal(t, fasthttp.StatusOK, code)
+	r = mustUnmarshalMessagesWire(t, body)
+	assert.Equal(t, 44, r.Total)
+	assert.Len(t, r.Messages, 4)
+	assert.False(t, r.HasMore)
+
+	code, _ = doGetMessagesWithOrderAndRoles(t, h, chatID, intPtr(0), intPtr(20), "", "foo")
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }

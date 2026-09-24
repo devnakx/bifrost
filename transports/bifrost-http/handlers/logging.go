@@ -1078,7 +1078,7 @@ func (h *LoggingHandler) getLogByID(ctx *fasthttp.RequestCtx) {
 	SendJSON(ctx, log)
 }
 
-// getLogMessages handles GET /api/logs/{id}/messages?offset=&limit= - paginated messages
+// getLogMessages handles GET /api/logs/{id}/messages?offset=&limit=&order=&roles= - paginated messages
 func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 	id, ok := ctx.UserValue("id").(string)
 	if !ok || id == "" {
@@ -1111,6 +1111,29 @@ func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "invalid order")
 		return
 	}
+	var roles []string
+	if v := strings.TrimSpace(string(ctx.QueryArgs().Peek("roles"))); v != "" {
+		seen := make(map[string]struct{})
+		for _, part := range strings.Split(v, ",") {
+			r := strings.TrimSpace(part)
+			if r == "" {
+				continue
+			}
+			switch r {
+			case "system", "user", "assistant", "tool", "reasoning":
+			default:
+				SendError(ctx, fasthttp.StatusBadRequest, "invalid roles")
+				return
+			}
+			if _, ok := seen[r]; !ok {
+				seen[r] = struct{}{}
+				roles = append(roles, r)
+			}
+		}
+		if len(roles) == 0 || len(roles) == 5 {
+			roles = nil
+		}
+	}
 	log, err := h.logManager.GetLogMessagesPayload(ctx, id)
 	if err != nil {
 		if errors.Is(err, logstore.ErrNotFound) {
@@ -1123,9 +1146,9 @@ func (h *LoggingHandler) getLogMessages(ctx *fasthttp.RequestCtx) {
 	var messages []json.RawMessage
 	var total int
 	if order == "desc" {
-		messages, total, err = logstore.SliceLogMessagesLatestFirst(log, offset, limit)
+		messages, total, err = logstore.SliceLogMessagesLatestFirstWithRoles(log, offset, limit, roles)
 	} else {
-		messages, total, err = logstore.SliceLogMessages(log, offset, limit)
+		messages, total, err = logstore.SliceLogMessagesWithRoles(log, offset, limit, roles)
 	}
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
