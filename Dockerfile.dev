@@ -43,7 +43,11 @@ RUN go work init && \
     go work use ./core && \
     go work use ./framework && \
     go work use ./transports && \
-    for d in ./plugins/*/; do [ -f "$d/go.mod" ] && go work use "$d"; done
+    for d in ./plugins/*/; do \
+      if [ -f "$d/go.mod" ]; then \
+        go work use "$d" || exit 1; \
+      fi; \
+    done
 
 # 嵌入 UI 产物到 Go 二进制（//go:embed）
 COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
