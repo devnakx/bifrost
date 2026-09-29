@@ -23,6 +23,7 @@ interface LogDetailSheetProps {
 	onViewSession?: (sessionId: string, logId: string) => void;
 	onFilterByParentRequestId?: (parentRequestId: string) => void;
 	onFilterBySessionId?: (sessionId: string) => void;
+	onOpenLog?: (logId: string) => void;
 }
 
 export function LogDetailSheet({
@@ -37,6 +38,7 @@ export function LogDetailSheet({
 	onViewSession,
 	onFilterByParentRequestId,
 	onFilterBySessionId,
+	onOpenLog,
 }: LogDetailSheetProps) {
 	const dispatch = useAppDispatch();
 	const [pollingInterval, setPollingInterval] = useState(0);
@@ -157,6 +159,7 @@ export function LogDetailSheet({
 						visibleRoles={visibleRoles}
 						setVisibleRoles={setVisibleRoles}
 						onFilterBySessionId={onFilterBySessionId}
+						onOpenLog={onOpenLog}
 						headerAction={
 							<>
 								{displayLog.parent_request_id && onViewSession ? (

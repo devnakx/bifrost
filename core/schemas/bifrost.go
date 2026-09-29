@@ -379,6 +379,7 @@ const (
 	BifrostContextKeyAllowPerRequestStorageOverride      BifrostContextKey = "bifrost-allow-per-request-storage-override"       // bool (set by transport from config — gates whether x-bf-disable-content-logging and x-bf-store-raw-request-response per-request overrides are honored)
 	BifrostContextKeyAllowPerRequestRawOverride          BifrostContextKey = "bifrost-allow-per-request-raw-override"           // bool (set by transport from config — gates whether x-bf-send-back-raw-request and x-bf-send-back-raw-response per-request overrides are honored)
 	BifrostContextKeyGuardrailMetadata                   BifrostContextKey = "bifrost-guardrail-debug"                          // *BifrostGuardrailMetadata (set by enterprise guardrails plugin - DO NOT SET THIS MANUALLY)
+	BifrostContextKeyGuardrailHeaders                    BifrostContextKey = "bifrost-guardrail-headers"                        // map[string]string (the headers guardrail rules match against as `headers`; set by the guardrails HTTP pre-hook, or by an in-process caller that sends no HTTP request, such as Warp)
 	BifrostContextKeyCacheMetadata                       BifrostContextKey = "bifrost-cache-debug"                              // *BifrostCacheMetadata (set by semantic cache plugin - DO NOT SET THIS MANUALLY)
 	BifrostContextKeyRoutingMetadata                     BifrostContextKey = "bifrost-routing-metadata"                         // *BifrostRoutingMetadata (set by routing plugin - DO NOT SET THIS MANUALLY)
 	BifrostContextKeyRedactionData                       BifrostContextKey = "bifrost-redaction-data"                           // RedactionData (set by enterprise guardrails plugin - DO NOT SET THIS MANUALLY)
@@ -2196,7 +2197,8 @@ type BifrostErrorExtraFields struct {
 	// post-LLM hooks (governance billing, logging cost) can charge for tokens
 	// the provider actually billed us for. Nil when the failure consumed no
 	// tokens (e.g. 401/403/429 before the model ran).
-	BilledUsage *BifrostLLMUsage `json:"billed_usage,omitempty"`
+	BilledUsage         *BifrostLLMUsage `json:"billed_usage,omitempty"`
+	NativeErrorResponse json.RawMessage  `json:"-"` // provider error body verbatim for native drop-in routes; never serialized
 
 	// ErrorType is this failure's normalized classification, declared by whoever
 	// produced the error. ClassifyErrorType returns it verbatim when set and infers
