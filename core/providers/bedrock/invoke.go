@@ -540,7 +540,7 @@ func (r *BedrockInvokeRequest) ToBifrostTextCompletionRequest(ctx *schemas.Bifro
 
 // ToBifrostEmbeddingRequest converts the invoke request to a BifrostEmbeddingRequest.
 // Handles both Titan (inputText) and Cohere (texts) embedding formats.
-func (r *BedrockInvokeRequest) ToBifrostEmbeddingRequest(ctx *schemas.BifrostContext) *schemas.BifrostEmbeddingRequest {
+func (r *BedrockInvokeRequest) ToBifrostEmbeddingRequest(ctx *schemas.BifrostContext) (*schemas.BifrostEmbeddingRequest, error) {
 	modelID := r.ModelID
 	if unescaped, err := url.PathUnescape(r.ModelID); err == nil {
 		modelID = unescaped
@@ -551,12 +551,53 @@ func (r *BedrockInvokeRequest) ToBifrostEmbeddingRequest(ctx *schemas.BifrostCon
 		Model:    model,
 	}
 
+	var contents []schemas.EmbeddingInputItem
 	if r.InputText != "" {
-		req.Input = &schemas.EmbeddingInput{Text: &r.InputText}
+		inputText := r.InputText
+		contents = append(contents, schemas.EmbeddingInputItem{Content: schemas.EmbeddingContent{
+			{Type: schemas.EmbeddingContentPartTypeText, Text: &inputText},
+		}})
 	} else if len(r.Texts) > 0 {
-		req.Input = &schemas.EmbeddingInput{Texts: r.Texts}
+		for _, t := range r.Texts {
+			text := t
+			contents = append(contents, schemas.EmbeddingInputItem{Content: schemas.EmbeddingContent{
+				{Type: schemas.EmbeddingContentPartTypeText, Text: &text},
+			}})
+		}
 	}
-	// image-only (r.Images) or mixed (r.Inputs): req.Input stays nil; data flows via ExtraParams
+	for _, img := range r.Images {
+		imgCopy := img
+		contents = append(contents, schemas.EmbeddingInputItem{Content: schemas.EmbeddingContent{
+			{Type: schemas.EmbeddingContentPartTypeImage, Image: &schemas.EmbeddingMediaPart{Data: &imgCopy}},
+		}})
+	}
+	for i, input := range r.Inputs {
+		content := make(schemas.EmbeddingContent, 0, len(input.Content))
+		for j, block := range input.Content {
+			switch block.Type {
+			case "text":
+				if block.Text == nil {
+					return nil, providerUtils.InvalidRequestErrorf("inputs[%d].content[%d]: text block missing text", i, j)
+				}
+				t := *block.Text
+				content = append(content, schemas.EmbeddingContentPart{Type: schemas.EmbeddingContentPartTypeText, Text: &t})
+			case "image_url":
+				if block.ImageURL == nil {
+					return nil, providerUtils.InvalidRequestErrorf("inputs[%d].content[%d]: image_url block missing image_url", i, j)
+				}
+				u := block.ImageURL.URL
+				content = append(content, schemas.EmbeddingContentPart{Type: schemas.EmbeddingContentPartTypeImage, Image: &schemas.EmbeddingMediaPart{URL: &u}})
+			default:
+				return nil, providerUtils.InvalidRequestErrorf("inputs[%d].content[%d]: unsupported embedding block type %q", i, j, block.Type)
+			}
+		}
+		if len(content) > 0 {
+			contents = append(contents, schemas.EmbeddingInputItem{Content: content})
+		}
+	}
+	if len(contents) > 0 {
+		req.Input = contents
+	}
 
 	extraParams := make(map[string]interface{})
 	// Forward known embedding-only params into ExtraParams so the provider can pick them up
@@ -602,7 +643,7 @@ func (r *BedrockInvokeRequest) ToBifrostEmbeddingRequest(ctx *schemas.BifrostCon
 	}
 	req.Params = params
 
-	return req
+	return req, nil
 }
 
 // ToBifrostImageGenerationRequest converts the invoke request to a BifrostImageGenerationRequest.
@@ -1985,11 +2026,21 @@ func toAnthropicInvokeStreamBytes(ctx *schemas.BifrostContext, resp *schemas.Bif
 		// Skip — the content_block_stop is emitted on OutputItemDone
 		return nil, nil
 
-	case schemas.ResponsesStreamResponseTypeCompleted:
+	// response.incomplete is terminal too: a truncated or filtered turn must still close
+	// with message_delta + message_stop, or the client never sees the stop reason.
+	case schemas.ResponsesStreamResponseTypeCompleted, schemas.ResponsesStreamResponseTypeIncomplete:
 		// Emit message_delta + message_stop as two separate events
 		stopReason := "end_turn"
 		if resp.Response != nil && resp.Response.IncompleteDetails != nil {
-			stopReason = resp.Response.IncompleteDetails.Reason
+			// Translate the Responses vocabulary into Anthropic stop reasons.
+			switch resp.Response.IncompleteDetails.Reason {
+			case schemas.ResponsesResponseIncompleteReasonMaxOutputTokens:
+				stopReason = "max_tokens"
+			case schemas.ResponsesResponseIncompleteReasonContentFilter:
+				stopReason = "refusal"
+			default:
+				stopReason = resp.Response.IncompleteDetails.Reason
+			}
 		}
 
 		// Build message_delta event
