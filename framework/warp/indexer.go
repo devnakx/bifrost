@@ -363,13 +363,8 @@ func generateWarpEmbedding(ctx context.Context, executor EmbeddingExecutor, conf
 	request := &schemas.BifrostEmbeddingRequest{
 		Provider: config.EmbeddingProvider,
 		Model:    config.EmbeddingModel,
-		Input: []schemas.EmbeddingInputItem{{
-			Content: schemas.EmbeddingContent{{
-				Type: schemas.EmbeddingContentPartTypeText,
-				Text: &text,
-			}},
-		}},
-		Params: &schemas.EmbeddingParameters{Dimensions: &dimension},
+		Input:    []schemas.EmbeddingInputItem{{Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: &text}}}},
+		Params:   &schemas.EmbeddingParameters{Dimensions: &dimension},
 	}
 	response, bifrostErr := executor(embeddingCtx, request)
 	if bifrostErr != nil {

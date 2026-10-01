@@ -109,10 +109,7 @@ func buildRequestSide(d *schemas.LLMSpanData, req *schemas.BifrostRequest, opts 
 			return
 		}
 		d.Embedding = r.Params
-		if len(r.Input) > 0 {
-			in := schemas.EmbeddingInput(r.Input)
-			d.EmbeddingInput = &in
-		}
+		d.EmbeddingInput = schemas.EmbeddingInput(r.Input)
 		if r.Params != nil {
 			d.Extra = mergeExtraParams(d.Extra, r.Params.ExtraParams)
 		}

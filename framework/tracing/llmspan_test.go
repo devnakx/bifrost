@@ -682,7 +682,7 @@ func embeddingFixture() (*schemas.BifrostRequest, *schemas.BifrostResponse) {
 		EmbeddingRequest: &schemas.BifrostEmbeddingRequest{
 			Provider: schemas.OpenAI,
 			Model:    "text-embedding-3-small",
-			Input: []schemas.EmbeddingInputItem{
+			Input: schemas.EmbeddingInput{
 				{Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: strPtr("alpha")}}},
 				{Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: strPtr("beta")}}},
 			},
