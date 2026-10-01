@@ -363,8 +363,13 @@ func generateWarpEmbedding(ctx context.Context, executor EmbeddingExecutor, conf
 	request := &schemas.BifrostEmbeddingRequest{
 		Provider: config.EmbeddingProvider,
 		Model:    config.EmbeddingModel,
-		Input:    &schemas.EmbeddingInput{Text: &text},
-		Params:   &schemas.EmbeddingParameters{Dimensions: &dimension},
+		Input: []schemas.EmbeddingInputItem{{
+			Content: schemas.EmbeddingContent{{
+				Type: schemas.EmbeddingContentPartTypeText,
+				Text: &text,
+			}},
+		}},
+		Params: &schemas.EmbeddingParameters{Dimensions: &dimension},
 	}
 	response, bifrostErr := executor(embeddingCtx, request)
 	if bifrostErr != nil {
@@ -441,7 +446,10 @@ func buildLogIndexItem(entry *logstore.Log) (logIndexItem, bool) {
 	if entry.UserAgent != nil && strings.Contains(strings.ToLower(*entry.UserAgent), "bifrost-warp") {
 		return logIndexItem{}, false
 	}
-	user := strings.Join(strings.Fields(entry.BuildInputContentSummary()), " ")
+	user := strings.Join(strings.Fields(logUserText(entry)), " ")
+	if user == "" {
+		user = strings.Join(strings.Fields(entry.BuildInputContentSummary()), " ")
+	}
 	if user == "" {
 		user = strings.Join(strings.Fields(entry.ContentSummary), " ")
 	}
@@ -490,6 +498,29 @@ func conversationalWarpObject(object string) bool {
 	default:
 		return object == "chat.completion" || object == "chat.completion.chunk" || object == "response"
 	}
+}
+
+func logUserText(entry *logstore.Log) string {
+	var parts []string
+	for i := range entry.InputHistoryParsed {
+		msg := &entry.InputHistoryParsed[i]
+		if msg.Role != schemas.ChatMessageRoleUser {
+			continue
+		}
+		if text := chatContentText(msg.Content); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	for i := range entry.ResponsesInputHistoryParsed {
+		message := &entry.ResponsesInputHistoryParsed[i]
+		if message.Role != nil && *message.Role != schemas.ResponsesInputMessageRoleUser {
+			continue
+		}
+		if text := responsesContentText(message.Content); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func logAssistantText(entry *logstore.Log) string {

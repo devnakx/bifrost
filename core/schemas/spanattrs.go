@@ -173,20 +173,29 @@ func (d *LLMSpanData) appendEmbeddingRequest(attrs map[string]any) {
 		}
 	}
 	in := d.EmbeddingInput
-	if in == nil {
+	if in == nil || len(*in) == 0 {
 		return
 	}
-	switch {
-	case in.Text != nil:
-		attrs[AttrInputText] = *in.Text
-	case in.Texts != nil:
-		attrs[AttrInputText] = strings.Join(in.Texts, ",")
-	case in.Embedding != nil:
-		parts := make([]string, len(in.Embedding))
-		for i, v := range in.Embedding {
-			parts[i] = fmt.Sprintf("%v", v)
+	var texts []string
+	var tokenParts []string
+	for _, item := range *in {
+		for _, part := range item.Content {
+			switch {
+			case part.Text != nil:
+				texts = append(texts, *part.Text)
+			case len(part.Tokens) > 0:
+				nums := make([]string, len(part.Tokens))
+				for i, v := range part.Tokens {
+					nums[i] = fmt.Sprintf("%v", v)
+				}
+				tokenParts = append(tokenParts, strings.Join(nums, ","))
+			}
 		}
-		attrs[AttrInputEmbedding] = strings.Join(parts, ",")
+	}
+	if len(texts) > 0 {
+		attrs[AttrInputText] = strings.Join(texts, ",")
+	} else if len(tokenParts) > 0 {
+		attrs[AttrInputEmbedding] = strings.Join(tokenParts, ",")
 	}
 }
 

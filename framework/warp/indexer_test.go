@@ -114,7 +114,7 @@ func TestWarpIndexerEmbedsAndStoresVisibleConversation(t *testing.T) {
 	executor := func(ctx *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
 		require.Equal(t, true, ctx.Value(schemas.BifrostContextKeySkipPluginPipeline))
 		require.Equal(t, "embedding-key", ctx.Value(schemas.BifrostContextKeyAPIKeyID))
-		embedded = *request.Input.Text
+		embedded = firstEmbeddingText(request)
 		vector := make([]float64, row.EmbeddingDimension)
 		return &schemas.BifrostEmbeddingResponse{Data: []schemas.EmbeddingData{{Embedding: schemas.EmbeddingStruct{EmbeddingArray: vector}}}}, nil
 	}
@@ -237,7 +237,7 @@ func TestWarpIndexerDrainsQueueOnClose(t *testing.T) {
 
 	executor := func(_ *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
 		mu.Lock()
-		seen[*request.Input.Text] = true
+		seen[firstEmbeddingText(request)] = true
 		mu.Unlock()
 		indexed.Done()
 		vector := make([]float64, 1536)

@@ -107,6 +107,17 @@ func backfillEmbeddingExecutor(_ *schemas.BifrostContext, request *schemas.Bifro
 	return &schemas.BifrostEmbeddingResponse{Data: []schemas.EmbeddingData{{Embedding: schemas.EmbeddingStruct{EmbeddingArray: make([]float64, dimension)}}}}, nil
 }
 
+func firstEmbeddingText(request *schemas.BifrostEmbeddingRequest) string {
+	for _, item := range request.Input {
+		for _, part := range item.Content {
+			if part.Text != nil {
+				return *part.Text
+			}
+		}
+	}
+	return ""
+}
+
 func TestWarpBackfillIndexesWindowAndCheckpointsCounts(t *testing.T) {
 	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	reader := &backfillLogReader{logs: []logstore.Log{
@@ -203,7 +214,7 @@ func TestWarpBackfillCancellationDuringIndexingNotCounted(t *testing.T) {
 	defer cancel()
 	cancelID := logs[2].ID
 	cancelDuringIndex := func(bctx *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-		if request.Input != nil && request.Input.Text != nil && strings.Contains(*request.Input.Text, cancelID) {
+		if strings.Contains(firstEmbeddingText(request), cancelID) {
 			cancel()
 			return nil, &schemas.BifrostError{Error: &schemas.ErrorField{Message: "caller cancelled"}}
 		}
@@ -657,7 +668,7 @@ func TestWarpBackfillSuccessResetsConsecutiveFailures(t *testing.T) {
 	// nothing about which call lands "first" or "the Nth" is deterministic.
 	successID := logs[len(logs)/2].ID
 	flaky := func(ctx *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-		if request.Input != nil && request.Input.Text != nil && strings.Contains(*request.Input.Text, successID) {
+		if strings.Contains(firstEmbeddingText(request), successID) {
 			return backfillEmbeddingExecutor(ctx, request)
 		}
 		return failingBackfillEmbeddingExecutor(ctx, request)
@@ -710,7 +721,7 @@ func TestWarpBackfillDoesNotCountVanishedLogsAsFailures(t *testing.T) {
 		WithConfigStore(&recordingStore{row: validWarpConfigRow()}), WithLogReader(reader),
 		WithVectorStore(newFakeWarpVectorStore()),
 		WithEmbeddingExecutor(func(ctx *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-			if strings.Contains(*request.Input.Text, "poison entry") {
+			if strings.Contains(firstEmbeddingText(request), "poison entry") {
 				return nil, &schemas.BifrostError{Error: &schemas.ErrorField{Message: "embedding failed"}}
 			}
 			return backfillEmbeddingExecutor(ctx, request)
@@ -843,7 +854,7 @@ func TestWarpBackfillResumesFromFailedRunCheckpoint(t *testing.T) {
 	// order regardless of completion order.
 	successID := logs[0].ID
 	firstThenFailing := func(ctx *schemas.BifrostContext, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-		if request.Input != nil && request.Input.Text != nil && strings.Contains(*request.Input.Text, successID) {
+		if strings.Contains(firstEmbeddingText(request), successID) {
 			return backfillEmbeddingExecutor(ctx, request)
 		}
 		return failingBackfillEmbeddingExecutor(ctx, request)
