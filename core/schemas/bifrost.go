@@ -89,6 +89,7 @@ var SupportedBaseProviders = []ModelProvider{
 	OpenAI,
 	HuggingFace,
 	Replicate,
+	Typesafe,
 }
 
 // StandardProviders is the list of all built-in (non-custom) providers.
@@ -204,6 +205,7 @@ const (
 	UnknownRequest                 RequestType = "unknown"
 	WebSocketResponsesRequest      RequestType = "websocket_responses"
 	RealtimeRequest                RequestType = "realtime"
+	LiveRequest                    RequestType = "live"
 )
 
 // BifrostContextKey is a type for context keys used in Bifrost.
@@ -296,6 +298,7 @@ const (
 	BifrostContextKeyNumberOfRetries                     BifrostContextKey = "bifrost-number-of-retries"               // int (to store the number of retries (set by bifrost - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyFallbackIndex                       BifrostContextKey = "bifrost-fallback-index"                  // int (to store the fallback index (set by bifrost - DO NOT SET THIS MANUALLY)) 0 for primary, 1 for first fallback, etc.
 	BifrostContextKeyResolvedAlias                       BifrostContextKey = "bifrost-resolved-alias"                  // *ResolvedAlias (set by bifrost after key-level alias resolution — providers read this for model_family routing and provider-specific overrides; nil/absent when no alias matched)
+	BifrostContextKeyProviderProxyConfig                 BifrostContextKey = "bifrost-provider-proxy-config"           // *ProxyConfig (set by bifrost per attempt from the serving provider's config - DO NOT SET THIS MANUALLY) - lets side fetches made on the provider's behalf (e.g. FetchAndEncodeURL) leave through the same proxy as its inference traffic; nil means direct
 	BifrostContextKeyRoutingInfo                         BifrostContextKey = "bifrost-routing-info"                    // RoutingInfo (set by bifrost per stream attempt - DO NOT SET THIS MANUALLY) - streams carry RoutingInfo only on chunks, so the transport reads this snapshot to emit routed-identity response headers before the first chunk
 	BifrostContextKeyRequestedProvider                   BifrostContextKey = "bifrost-requested-provider"              // ModelProvider (set by bifrost before PreRequestHooks run - DO NOT SET THIS MANUALLY) - provider the caller sent, before routing rules, load balancing or session routing rewrote it; empty when the caller sent a bare model
 	BifrostContextKeyRequestedModel                      BifrostContextKey = "bifrost-requested-model"                 // string (set by bifrost before PreRequestHooks run - DO NOT SET THIS MANUALLY) - model the caller sent, before routing rules, load balancing or session routing rewrote it
@@ -326,6 +329,7 @@ const (
 	BifrostContextKeyUserAgent                           BifrostContextKey = "bifrost-user-agent"                               // string (set by bifrost)
 	BifrostContextKeyApp                                 BifrostContextKey = "app"                                              // string (canonical app key such as claude-code; set by plugins)
 	BifrostContextKeySkipBudgetAndRateLimits             BifrostContextKey = "bifrost-skip-budget-and-rate-limits"              // bool (set by bifrost for read-only requests like list models that don't consume quota)
+	BifrostContextKeySessionContinuation                 BifrostContextKey = "bifrost-session-continuation"                     // bool (a billing unit of an already-admitted session, e.g. a GPT Live window; not checked or counted as a request)
 	BifrostContextKeySkipProviderCheck                   BifrostContextKey = "bifrost-skip-provider-check"                      // bool (set by the transport for requests that are evaluated but never routed, such as /inspect, where the provider is the intercepted upstream rather than an operator choice; skips the virtual key and access profile provider allowlists)
 	BifrostContextKeySkipModelCheck                      BifrostContextKey = "bifrost-skip-model-check"                         // bool (set by the transport for requests that are evaluated but never routed, such as /inspect, where the model is the intercepted upstream model rather than an operator grant; skips the virtual key and access profile model allowlists)
 	BifrostContextKeySkipVirtualKeyUsageTracking         BifrostContextKey = "bifrost-skip-virtual-key-usage-tracking"          // bool (set by governance callers to skip VK usage while preserving VK auth/attribution)
