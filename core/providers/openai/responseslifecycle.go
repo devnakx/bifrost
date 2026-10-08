@@ -314,15 +314,21 @@ func (provider *OpenAIProvider) ResponsesRetrieveStream(ctx *schemas.BifrostCont
 			}
 			jsonData := string(data)
 
-		var response schemas.BifrostResponsesStreamResponse
-		// Time the retrieve-stream decode as the response-parse phase.
-		parseStart := time.Now()
-		err := sonic.UnmarshalString(jsonData, &response)
-		schemas.AddStreamParse(ctx, time.Since(parseStart))
-		if err != nil {
-			logStreamParseFailure(provider.logger, ctx.Err(), err)
-			continue
-		}
+			var response schemas.BifrostResponsesStreamResponse
+			// Time the retrieve-stream decode as the response-parse phase.
+			parseStart := time.Now()
+			err := sonic.UnmarshalString(jsonData, &response)
+			if err != nil {
+				// See the create-stream path: shell_call_output_content.delta's `delta` is
+				// an object, not a string.
+				response = schemas.BifrostResponsesStreamResponse{}
+				err = schemas.UnmarshalResponsesStreamObjectDelta([]byte(jsonData), &response)
+			}
+			schemas.AddStreamParse(ctx, time.Since(parseStart))
+			if err != nil {
+				logStreamParseFailure(provider.logger, ctx.Err(), err)
+				continue
+			}
 
 			if sendBackRawResponse {
 				response.ExtraFields.RawResponse = jsonData

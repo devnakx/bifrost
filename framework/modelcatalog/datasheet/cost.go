@@ -97,7 +97,7 @@ func (s *Store) CalculateCostBreakdown(result *schemas.BifrostResponse, scopes *
 }
 
 // RoutingCallCost calculates the cost of one routing-classification call — a
-// semantic embed, LLM completion, or Jev decision. Exported so
+// semantic embed, LLM completion, or decision-model call. Exported so
 // telemetry can price each call independently and unconditionally, while
 // CalculateCost folds a call's cost into the request's cost only when that
 // call's CountTowardBudgets is set. If scopes is nil, an empty LookupScopes is
@@ -204,7 +204,7 @@ func (s *Store) CalculateCostBreakdownForUsage(usage *schemas.BifrostLLMUsage, p
 	}
 
 	// If the provider already computed cost, trust it (matches calculateBaseCost).
-	if usage.Cost != nil && usage.Cost.TotalCost > 0 {
+	if s.providerCostUsable(usage.Cost, provider) {
 		return usage.Cost
 	}
 
@@ -327,7 +327,7 @@ func (s *Store) CalculateBatchCostDetailsForUsage(usage *schemas.BifrostLLMUsage
 	// non-nil but zero cost (e.g. a partial cost object on the wire) must fall
 	// through to the catalog rates rather than price the row at zero — matching
 	// CalculateCostForUsage and calculateBaseCost.
-	if usage.Cost != nil && usage.Cost.TotalCost > 0 {
+	if s.providerCostUsable(usage.Cost, provider) {
 		return BatchCostDetails{
 			Cost:             usage.Cost.TotalCost,
 			Priced:           true,
@@ -535,12 +535,12 @@ func (s *Store) calculateBaseCost(result *schemas.BifrostResponse, scopes Lookup
 		return nil
 	}
 
-	// If provider already computed cost, use it
-	if input.usage != nil && input.usage.Cost != nil && input.usage.Cost.TotalCost > 0 {
+	// If provider already computed cost, use it unless the provider is configured to ignore it
+	if input.usage != nil && s.providerCostUsable(input.usage.Cost, routingInfo.Provider) {
 		return input.usage.Cost
 	}
 	// Image responses carry usage on imageUsage, never on input.usage.
-	if input.imageUsage != nil && input.imageUsage.Cost != nil && input.imageUsage.Cost.TotalCost > 0 {
+	if input.imageUsage != nil && s.providerCostUsable(input.imageUsage.Cost, routingInfo.Provider) {
 		return input.imageUsage.Cost
 	}
 
@@ -789,18 +789,19 @@ func extractCostInput(result *schemas.BifrostResponse) costInput {
 			// the provider-cost short-circuit in computeCost uses it verbatim; covers task types (3D,
 			// etc.) that have no datasheet rate.
 			input.usage = &schemas.BifrostLLMUsage{Cost: video.Usage.Cost}
-		} else {
-			if video.Seconds != nil {
-				if seconds, err := strconv.Atoi(*video.Seconds); err == nil {
-					input.videoSeconds = &seconds
-				}
-			}
-			// Size and clip count drive the output rate and its multiplier. Neither can
-			// bypass the no-usage guard below on its own: without seconds there is still
-			// nothing to price.
-			input.videoSize = video.Size
-			input.videoCount = len(video.Videos)
 		}
+		// Dimensions are kept even when a provider cost is present, so catalog pricing still
+		// works when that provider's reported cost is ignored.
+		if video.Seconds != nil {
+			if seconds, err := strconv.Atoi(*video.Seconds); err == nil {
+				input.videoSeconds = &seconds
+			}
+		}
+		// Size and clip count drive the output rate and its multiplier. Neither can
+		// bypass the no-usage guard below on its own: without seconds there is still
+		// nothing to price.
+		input.videoSize = video.Size
+		input.videoCount = len(video.Videos)
 
 	case result.OCRResponse != nil:
 		pages := len(result.OCRResponse.Pages)
@@ -2237,6 +2238,7 @@ func (s *Store) resolvePricing(routingInfo schemas.RoutingInfo, requestType sche
 //   - Bedrock Mantle: folded onto the "bedrock" provider up front (datasheet rows for all Bedrock variants are stored there), so it shares every Bedrock fallback.
 //   - All providers: chat and responses requests retry in each other's mode, since a model served over both APIs often has a datasheet row under only one of them.
 //   - All providers: for ImageEdit/ImageVariation requests, retries the lookup in image-generation mode.
+//   - All providers: live requests retry in "realtime" mode, where the datasheet feed files GPT Live models.
 //
 // The method acquires a read lock for the duration of the lookup.
 //
@@ -2344,6 +2346,15 @@ func (s *Store) getBasePricing(model, provider string, requestType schemas.Reque
 	if hasFallbackMode {
 		s.logger.Debug("primary lookup failed, trying the same model in %s mode", fallbackMode)
 		pricing, ok = s.pricingData[makeKey(model, provider, fallbackMode)]
+		if ok {
+			return &pricing, true
+		}
+	}
+
+	// The feed files GPT Live models under the Realtime API's mode.
+	if requestType == schemas.LiveRequest {
+		s.logger.Debug("primary lookup failed, trying realtime mode for the same live model")
+		pricing, ok = s.pricingData[makeKey(model, provider, "realtime")]
 		if ok {
 			return &pricing, true
 		}

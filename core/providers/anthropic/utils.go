@@ -155,6 +155,9 @@ func ValidateResponsesToolsForProvider(tools []schemas.ResponsesTool, caps schem
 			supported = caps.SupportsCodeExecution(features.CodeExecution || features.CodeExecNova)
 		case schemas.ResponsesToolTypeComputerUsePreview:
 			supported = features.ComputerUse
+		case schemas.ResponsesToolTypeComputer:
+			supported = features.ComputerUse &&
+				(ComputerUseGeneration(caps) == ComputerUseGenToolset20260801 || AcceptsComputerToolset(caps))
 		case schemas.ResponsesToolTypeMCP:
 			supported = caps.SupportsMCP(features.MCP)
 		case schemas.ResponsesToolTypeLocalShell:
@@ -200,6 +203,66 @@ var (
 		"compaction": AnthropicStopReasonCompaction,
 	}
 )
+
+// supportsPerMessageOutputConfig reports whether output_config on a messages[] entry
+// (per-message effort, beta mid-conversation-output-config-2026-07-01) may be forwarded.
+// The datasheet's supports_mid_conversation_output_config wins when set: the record is
+// keyed per (provider, model), so a surface that ships the feature (e.g. Vertex) can be
+// enabled without a release. Without a record it falls back to the hardcoded gates:
+// ProviderFeatures.MidConvOutputConfig (Anthropic direct only) and the documented models.
+func supportsPerMessageOutputConfig(caps schemas.ModelCaps) bool {
+	return caps.SupportsMidConvOutputConfig(
+		ProviderFeatures[caps.Provider()].MidConvOutputConfig &&
+			DefaultSupportsMidConversationOutputConfig(caps.Provider(), caps.Model()))
+}
+
+var (
+	// outputConfigKeyToken is how the output_config key is spelled in raw JSON.
+	outputConfigKeyToken = []byte(`"output_config"`)
+	// cacheControlScopeKeyToken is how the cache_control.scope key is spelled in raw JSON.
+	cacheControlScopeKeyToken = []byte(`"scope"`)
+	// fallbackBlockTypeToken is how the server-side fallback block type value is spelled.
+	fallbackBlockTypeToken = []byte(`"` + string(AnthropicContentBlockTypeFallback) + `"`)
+)
+
+// mayCarryPerMessageOutputConfig is a conservative byte prefilter for messages[].output_config.
+// A JSON key is written with unescaped quotes, and inside a string value those quotes are
+// escaped, so the token only matches a key or a value that is exactly "output_config". When it
+// occurs no more often than the top-level output_config accounts for, no message carries the
+// field and the message walk is skipped; any other count falls through to the walk. A key
+// spelled with escapes ("output\u005fconfig") is not matched and reaches the provider as sent.
+func mayCarryPerMessageOutputConfig(jsonBody []byte) bool {
+	switch bytes.Count(jsonBody, outputConfigKeyToken) {
+	case 0:
+		return false
+	case 1:
+		return !providerUtils.JSONFieldExists(jsonBody, "output_config")
+	}
+	return true
+}
+
+// isEffortOnlyRawSystemMessage reports whether msg is role:"system" with missing, "" or []
+// content: the effort-only form, which carries nothing but its output_config.
+func isEffortOnlyRawSystemMessage(msg gjson.Result) bool {
+	if msg.Get("role").String() != string(AnthropicMessageRoleSystem) {
+		return false
+	}
+	content := msg.Get("content")
+	switch {
+	case !content.Exists():
+		return true
+	case content.IsArray():
+		empty := true
+		content.ForEach(func(_, _ gjson.Result) bool {
+			empty = false
+			return false
+		})
+		return empty
+	case content.Type == gjson.String:
+		return content.String() == ""
+	}
+	return false
+}
 
 // stripUnsupportedAnthropicFields removes request-level and tool-level fields
 // that the target Anthropic-family provider does not support, according to the
@@ -587,29 +650,78 @@ func StripUnsupportedFieldsFromRawBody(jsonBody []byte, provider schemas.ModelPr
 	// history. Anthropic-only; forwarding them to a provider without the feature
 	// (e.g. a gateway fallback from Anthropic to Vertex) sends an unknown content
 	// block. The marker carries no user content, so dropping it is lossless.
-	if !features.ServerSideFallback {
+	// The byte prefilter keeps the common body (no fallback block) off the message walk.
+	if !features.ServerSideFallback && bytes.Contains(jsonBody, fallbackBlockTypeToken) {
 		if msgs := providerUtils.GetJSONField(jsonBody, "messages"); msgs.IsArray() {
-			for mi, msg := range msgs.Array() {
+			mi := -1
+			msgs.ForEach(func(_, msg gjson.Result) bool {
+				mi++
 				content := msg.Get("content")
 				if !content.IsArray() {
-					continue
+					return true
 				}
-				kept := make([]string, 0, len(content.Array()))
+				isFallback := func(block gjson.Result) bool {
+					return block.Get("type").String() == string(AnthropicContentBlockTypeFallback)
+				}
 				dropped := false
-				for _, block := range content.Array() {
-					if block.Get("type").String() == string(AnthropicContentBlockTypeFallback) {
-						dropped = true
-						continue
-					}
-					kept = append(kept, block.Raw)
-				}
+				content.ForEach(func(_, block gjson.Result) bool {
+					dropped = isFallback(block)
+					return !dropped
+				})
 				if !dropped {
-					continue
+					return true
 				}
-				// Message indices are stable (only content arrays are replaced).
+				var kept []string
+				content.ForEach(func(_, block gjson.Result) bool {
+					if !isFallback(block) {
+						kept = append(kept, block.Raw)
+					}
+					return true
+				})
+				// Message indices are stable (only content arrays are replaced). The walk reads
+				// msgs, which holds the original bytes, so rewriting jsonBody mid-walk is safe.
 				jsonBody, err = sjson.SetRawBytes(jsonBody, fmt.Sprintf("messages.%d.content", mi), []byte("["+strings.Join(kept, ",")+"]"))
-				if err != nil {
-					return nil, fmt.Errorf("strip raw fallback blocks: %w", err)
+				return err == nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("strip raw fallback blocks: %w", err)
+			}
+		}
+	}
+
+	// messages[].output_config — per-message effort (beta mid-conversation-output-config).
+	// Claude Code sends it on a text-bearing role:"system" message next to the top-level
+	// output_config, and Vertex rejects it with "messages.N.output_config: Extra inputs are
+	// not permitted". Where per-message effort is unsupported it is removed; the message text
+	// and the top-level output_config stay. An effort-only system message (no content) exists
+	// solely to carry the override, so it is dropped whole rather than sent empty.
+	//
+	// The typed path needs no twin: AnthropicMessage.OutputConfig is only ever set by the
+	// conversion (perMessageOutputConfigFor), which applies the same gate.
+	if !supportsPerMessageOutputConfig(caps) && mayCarryPerMessageOutputConfig(jsonBody) {
+		if msgs := providerUtils.GetJSONField(jsonBody, "messages"); msgs.IsArray() {
+			type hit struct {
+				index       int
+				dropMessage bool
+			}
+			var hits []hit
+			mi := -1
+			msgs.ForEach(func(_, msg gjson.Result) bool {
+				mi++
+				if msg.Get("output_config").Exists() {
+					hits = append(hits, hit{index: mi, dropMessage: isEffortOnlyRawSystemMessage(msg)})
+				}
+				return true
+			})
+			// sjson has no wildcard delete, so each hit is deleted by index, last first:
+			// dropping a whole message shifts every later index.
+			for j := len(hits) - 1; j >= 0; j-- {
+				path := fmt.Sprintf("messages.%d", hits[j].index)
+				if !hits[j].dropMessage {
+					path += ".output_config"
+				}
+				if jsonBody, err = providerUtils.DeleteJSONField(jsonBody, path); err != nil {
+					return nil, fmt.Errorf("strip raw %s: %w", path, err)
 				}
 			}
 		}
@@ -925,7 +1037,9 @@ func StripUnsupportedFieldsFromRawBody(jsonBody []byte, provider schemas.ModelPr
 	// Addressing through the whole body (system.<i>.cache_control.scope) would
 	// reserialise the entire request per block, making this O(blocks × body).
 	// Pinned by TestStripUnsupportedFieldsFromRawBody_AllocationScaling.
-	if !features.PromptCachingScope {
+	// The byte prefilter skips both walks when no "scope" key can be present; each walk
+	// otherwise copies every block (and every message) just to look.
+	if !features.PromptCachingScope && bytes.Contains(jsonBody, cacheControlScopeKeyToken) {
 		if systemResult := providerUtils.GetJSONField(jsonBody, "system"); systemResult.Exists() && systemResult.IsArray() {
 			blocks := systemResult.Array()
 			rebuilt := make([][]byte, len(blocks))
@@ -946,7 +1060,8 @@ func StripUnsupportedFieldsFromRawBody(jsonBody []byte, provider schemas.ModelPr
 			}
 		}
 
-		if messagesResult := providerUtils.GetJSONField(jsonBody, "messages"); messagesResult.Exists() && messagesResult.IsArray() {
+		if messagesResult := providerUtils.GetJSONField(jsonBody, "messages"); messagesResult.Exists() && messagesResult.IsArray() &&
+			messagesCarryCacheControlScope(messagesResult) {
 			messages := messagesResult.Array()
 			rebuiltMessages := make([][]byte, len(messages))
 			anyMessageChanged := false
@@ -985,6 +1100,24 @@ func StripUnsupportedFieldsFromRawBody(jsonBody []byte, provider schemas.ModelPr
 	}
 
 	return jsonBody, nil
+}
+
+// messagesCarryCacheControlScope reports whether any message content block carries
+// cache_control.scope, so the copying rebuild runs only when it will change something.
+func messagesCarryCacheControlScope(messages gjson.Result) bool {
+	found := false
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, block gjson.Result) bool {
+			found = block.Get("cache_control.scope").Exists()
+			return !found
+		})
+		return !found
+	})
+	return found
 }
 
 // stripCacheControlScope removes cache_control.scope from one content block's JSON,
@@ -1167,6 +1300,110 @@ func DefaultSupportsSafeguards(provider schemas.ModelProvider, model string) boo
 		return false
 	}
 	return IsSonnet5Plus(model) || IsOpus47Plus(model) || IsFableFamily(model)
+}
+
+// DefaultEagerInputStreaming reports whether Bifrost opts custom tools into
+// fine-grained tool streaming (eager_input_streaming) when the caller left the
+// flag unset. Without it, Claude on Bedrock and Vertex emits tool input one
+// complete JSON value at a time, so a long argument (a Write call's content)
+// arrives as a single burst after minutes of silence and clients with an idle
+// watchdog abort. Claude Code sets the flag itself only when it talks to
+// Bedrock or Vertex directly; pointed at a gateway it sends nothing, so the
+// gateway has to supply it. The model gate mirrors Claude Code's own catalog:
+// every Claude model on Vertex; Sonnet 4.6, Sonnet 5+, Opus 4.7+ and the Fable
+// family on Bedrock. Anthropic direct streams tool input incrementally without
+// the flag and is left alone.
+func DefaultEagerInputStreaming(provider schemas.ModelProvider, model string) bool {
+	switch provider {
+	case schemas.Vertex:
+		return schemas.IsAnthropicModel(strings.ToLower(model))
+	case schemas.Bedrock:
+		m := strings.ToLower(model)
+		isSonnet46 := strings.Contains(m, "sonnet") && (strings.Contains(m, "4-6") || strings.Contains(m, "4.6"))
+		return isSonnet46 || IsSonnet5Plus(m) || IsOpus47Plus(m) || IsFableFamily(m)
+	default:
+		return false
+	}
+}
+
+// ShouldDefaultEagerInputStreaming combines the provider feature, the model
+// datasheet override and the name-based default for DefaultEagerInputStreaming.
+func ShouldDefaultEagerInputStreaming(provider schemas.ModelProvider, model string) bool {
+	features, ok := ProviderFeatures[provider]
+	if !ok || !features.EagerInputStreaming {
+		return false
+	}
+	caps := schemas.ResolveModelCaps(provider, model)
+	if !caps.SupportsEagerInputStreaming(true) {
+		return false
+	}
+	return DefaultEagerInputStreaming(provider, caps.Model())
+}
+
+// isAnthropicCustomTool reports whether a typed tool is a client-defined
+// function tool, the only kind eager_input_streaming applies to.
+func isAnthropicCustomTool(tool *AnthropicTool) bool {
+	if tool.MCPToolset != nil || tool.Name == "" {
+		return false
+	}
+	return tool.Type == nil || *tool.Type == AnthropicToolTypeCustom
+}
+
+// applyDefaultEagerInputStreaming sets eager_input_streaming on every custom
+// tool that leaves it unset, when DefaultEagerInputStreaming holds for the
+// pair. An explicit false from the caller is kept. Run it before
+// AddMissingBetaHeadersToContext so the fine-grained-tool-streaming beta is
+// derived from the flag.
+func applyDefaultEagerInputStreaming(req *AnthropicMessageRequest, provider schemas.ModelProvider, model string) {
+	if req == nil || len(req.Tools) == 0 || !ShouldDefaultEagerInputStreaming(provider, model) {
+		return
+	}
+	for i := range req.Tools {
+		tool := &req.Tools[i]
+		if tool.EagerInputStreaming == nil && isAnthropicCustomTool(tool) {
+			tool.EagerInputStreaming = schemas.Ptr(true)
+		}
+	}
+}
+
+// ApplyDefaultEagerInputStreamingToRawBody is the raw-body counterpart of
+// applyDefaultEagerInputStreaming, used when the client's request body is
+// forwarded verbatim (Claude Code passthrough).
+func ApplyDefaultEagerInputStreamingToRawBody(jsonBody []byte, provider schemas.ModelProvider, model string) ([]byte, error) {
+	toolsResult := providerUtils.GetJSONField(jsonBody, "tools")
+	if !toolsResult.Exists() || !toolsResult.IsArray() || !ShouldDefaultEagerInputStreaming(provider, model) {
+		return jsonBody, nil
+	}
+	// Patch each tool element on its own and write tools back once. Setting
+	// tools.N.eager_input_streaming per tool would reserialise the entire
+	// request body every time, making this O(tools × body).
+	// Pinned by TestApplyDefaultEagerInputStreamingToRawBody_AllocationScaling.
+	tools := toolsResult.Array()
+	parts := make([][]byte, len(tools))
+	changed := false
+	for i, tool := range tools {
+		parts[i] = []byte(tool.Raw)
+		if tool.Get("eager_input_streaming").Exists() || tool.Get("name").String() == "" {
+			continue
+		}
+		if toolType := tool.Get("type"); toolType.Exists() && toolType.String() != string(AnthropicToolTypeCustom) {
+			continue
+		}
+		updated, err := providerUtils.SetJSONField(parts[i], "eager_input_streaming", true)
+		if err != nil {
+			return nil, fmt.Errorf("set raw tools.%d.eager_input_streaming: %w", i, err)
+		}
+		parts[i] = updated
+		changed = true
+	}
+	if !changed {
+		return jsonBody, nil
+	}
+	jsonBody, err := providerUtils.SetRawJSONField(jsonBody, "tools", rawJSONArrayOf(parts))
+	if err != nil {
+		return nil, fmt.Errorf("set raw tools eager_input_streaming: %w", err)
+	}
+	return jsonBody, nil
 }
 
 // DefaultSupportsAdaptiveThinking: thinking.type "adaptive" is accepted on Opus
@@ -2161,7 +2398,7 @@ func addMissingBetaHeadersToContext(ctx *schemas.BifrostContext, req *AnthropicM
 	// derives it identically. Model support is enforced at conversion time, where an
 	// unsupported model has the override dropped before it can reach here.
 	if signals.midConversationOutputConfig {
-		if !hasProvider || features.MidConvOutputConfig {
+		if !hasProvider || supportsPerMessageOutputConfig(caps) {
 			headers = appendUniqueHeader(headers, AnthropicMidConversationOutputConfigBetaHeader)
 		}
 	}
@@ -2391,6 +2628,79 @@ func doesWebSearchOrFetchAutoInjectCodeExecution(toolType string) bool {
 
 	// Keeping it for backward compatibility as this always used to be true
 	return true
+}
+
+// resolveAnthropicProgrammaticCaller decides what OpenAI's "programmatic" caller becomes for this request.
+func resolveAnthropicProgrammaticCaller(declaredVersion string, hasCodeExecutionTool bool) (caller string, emitVersion string) {
+	switch AnthropicToolType(declaredVersion) {
+	case AnthropicToolTypeCodeExecution, AnthropicToolTypeCodeExecution20260120, AnthropicToolTypeCodeExecution20260521:
+		return declaredVersion, ""
+	case AnthropicToolTypeCodeExecution20250522:
+		// Legacy Python-only: allowed_callers rejects it, and naming any other version
+		// makes the auto-injected code_execution tool collide with the declared one.
+		return "", ""
+	}
+	if hasCodeExecutionTool {
+		if declaredVersion != "" {
+			return declaredVersion, ""
+		}
+		// A version-less code_interpreter (the OpenAI shape) would default to
+		// code_execution_20250825, which has no programmatic tool calling — emit
+		// 20260120 instead so the caller restriction is reachable.
+		return string(AnthropicToolTypeCodeExecution20260120), string(AnthropicToolTypeCodeExecution20260120)
+	}
+	// No code execution tool declared: Anthropic auto-injects the version named here.
+	return string(AnthropicToolTypeCodeExecution20260120), ""
+}
+
+// anthropicAllowedCallers rewrites OpenAI's "programmatic" caller into Anthropic's
+// versioned vocabulary, dropping it when the request's code execution version has no
+// caller value. Anthropic's own values pass through untouched.
+func anthropicAllowedCallers(callers []string, programmaticCaller string) []string {
+	if len(callers) == 0 {
+		return callers
+	}
+	mapped := make([]string, 0, len(callers))
+	seen := make(map[string]bool, len(callers))
+	for _, caller := range callers {
+		if caller == schemas.ResponsesToolCallerProgrammatic {
+			if programmaticCaller == "" {
+				continue
+			}
+			caller = programmaticCaller
+		}
+		if seen[caller] {
+			continue
+		}
+		seen[caller] = true
+		mapped = append(mapped, caller)
+	}
+	if len(mapped) == 0 {
+		return nil
+	}
+	return mapped
+}
+
+// declaredChatCodeExecutionVersion is declaredCodeExecutionVersion for the Chat
+// shape, where the code execution tool carries its version in Type.
+func declaredChatCodeExecutionVersion(tools []schemas.ChatTool) (string, bool) {
+	for _, tool := range tools {
+		if strings.HasPrefix(string(tool.Type), string(AnthropicToolNameCodeExecution)+"_") {
+			return string(tool.Type), true
+		}
+	}
+	return "", false
+}
+
+// hasProgrammaticCaller reports whether any caller list asks for OpenAI's
+// "programmatic" context, which is the only value needing translation.
+func hasProgrammaticCaller(callers []string) bool {
+	for _, caller := range callers {
+		if caller == schemas.ResponsesToolCallerProgrammatic {
+			return true
+		}
+	}
+	return false
 }
 
 // StripEmptyThinkingBlocks removes thinking content blocks that would be
