@@ -69,6 +69,7 @@ import { Link } from "@tanstack/react-router";
 import { addMilliseconds, format } from "date-fns";
 import { AlertCircle, ChevronDown, Clipboard, Copy, Download, Loader2, MoreVertical, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { parseAsBoolean, parseAsString, useQueryState } from "nuqs";
 import { toast } from "sonner";
 import BlockHeader from "../views/blockHeader";
 import CollapsibleBox from "../views/collapsibleBox";
@@ -825,6 +826,12 @@ export function LogDetailView({
 	}, [log?.id, revealAvailable]);
 
 	const allRoles: MessageRole[] = ["system", "user", "assistant", "tool", "reasoning"];
+	// Kept in the URL so the open section and active tab survive switching logs, which remounts this view.
+	const [moreDetailsOpen, setMoreDetailsOpen] = useQueryState(
+		"log_more",
+		parseAsBoolean.withDefault(false).withOptions({ history: "replace" }),
+	);
+	const [tabParam, setTabParam] = useQueryState("log_tab", parseAsString.withOptions({ history: "replace" }));
 
 	const handleToggleReveal = (checked: boolean) => {
 		setShowRevealedValues(checked && revealAvailable);
@@ -1040,6 +1047,17 @@ export function LogDetailView({
 		} catch {}
 		return 0;
 	})();
+
+	const availableTabs = [
+		showBatchDetailsTab && "details",
+		showTabs && !isBatch && "messages",
+		showTabs && !isPassthrough && !log.list_models_output && !isBatch && !isEmbedding && "tools",
+		showTabs && "routing",
+		"plugins",
+		!isPassthrough && "raw",
+	].filter((t): t is string => Boolean(t));
+	const defaultTab = showBatchDetailsTab ? "details" : showTabs && !isBatch ? "messages" : showTabs ? "routing" : "plugins";
+	const activeTab = tabParam && availableTabs.includes(tabParam) ? tabParam : defaultTab;
 
 	return (
 		<div data-testid="logdetails-content" data-loading={isDetailMetaLoading ? "true" : "false"}>
@@ -1422,7 +1440,11 @@ export function LogDetailView({
 					)}
 				</div>
 			</div>
-			<details className="group bg-card rounded-sm border" open={false}>
+			<details
+				className="group bg-card rounded-sm border"
+				open={moreDetailsOpen}
+				onToggle={(e) => setMoreDetailsOpen(e.currentTarget.open)}
+			>
 				<summary className="hover:bg-muted/30 flex cursor-pointer items-center justify-between px-4 py-2.5 text-sm transition">
 					<span className="text-foreground font-medium">More details</span>
 					<span className="text-muted-foreground flex items-center gap-2 text-xs">
@@ -2470,9 +2492,10 @@ export function LogDetailView({
 			</details>
 			<Tabs
 				key={log.id}
-				defaultValue={showBatchDetailsTab ? "details" : showTabs && !isBatch ? "messages" : showTabs ? "routing" : "plugins"}
+				value={activeTab}
 				className="gap-2"
 				onValueChange={(v) => {
+					setTabParam(v);
 					if (v === "raw" && !rawTabActiveRef.current) {
 						rawTabActiveRef.current = true;
 						ensureRawFetched();

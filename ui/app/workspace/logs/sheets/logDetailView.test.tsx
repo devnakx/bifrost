@@ -33,6 +33,12 @@ vi.mock("@/components/ui/skeleton", () => ({
 		return require("react").createElement("div", { "data-slot": "skeleton", className });
 	},
 }));
+// nuqs 的 useQueryState 需要 adapter 上下文，SSR 测试用默认值 stub 替代
+vi.mock("nuqs", () => ({
+	parseAsBoolean: { withDefault: (d: boolean) => ({ withOptions: () => ({ defaultValue: d }) }) },
+	parseAsString: { withOptions: () => ({}) },
+	useQueryState: (_key: string, parser: any) => [parser?.defaultValue ?? null, vi.fn()],
+}));
 // renderToString 无法驱动 useState：mock 在渲染期按文本标签捕获菜单处理器，测试直接调用它们模拟用户交互
 const dropdownRegistry = vi.hoisted(() => ({
 	checkboxItems: [] as Array<{ label: string; checked: unknown; onCheckedChange: (checked: boolean) => void }>,

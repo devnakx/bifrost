@@ -46,7 +46,7 @@ func TestHybrid_FindByIDMessagesProjection_Contract(t *testing.T) {
 	defer inner.Close(ctx)
 
 	objStore := objectstore.NewInMemoryObjectStore()
-	hybrid := newHybridLogStore(inner, objStore, "test-contract", hybridTestLogger{}, nil)
+	hybrid := newHybridLogStore(inner, objStore, "test-contract", hybridTestLogger{}, nil, nil)
 	defer hybrid.Close(ctx)
 
 	// 构造带全量 payload 的日志：消息列 + 非消息列（params/token_usage/raw）

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -80,6 +81,9 @@ type RDBLogStore struct {
 	// matViewRefreshTimeout bounds a self-heal refresh the same way a periodic
 	// tick is bounded. Zero means unbounded (maintenance not configured).
 	matViewRefreshTimeout time.Duration
+	// Lazily built shared probe behind MigrationInProgress (see maintenancegate.go).
+	migrationProbeOnce sync.Once
+	migrationProbeInst *migrationLockProbe
 }
 
 // generateBucketTimestamps generates all bucket timestamps for a time range.
@@ -1630,11 +1634,15 @@ func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outpu
 			ELSE bifrost_safe_jsonb_preview(input_history, %d) END AS input_history`,
 			maxListInputPreviewChars)
 	case "clickhouse":
-		// ClickHouse: return the full history columns as-is. The last-message
-		// truncation optimization the SQLite/Postgres list path applies is
-		// deferred (correctness over payload size); hybrid offloading and
-		// content_summary already bound list payloads in practice.
-		inputHistoryExpr = `input_history AS input_history`
+		// ClickHouse: extract the last message from JSON array histories while
+		// keeping realtime turns and non-array or invalid payloads untouched.
+		// postgres/sqlite 在 SQL 侧取输入预览，Go 侧 trimListPayloadPreviews
+		// 不碰 InputHistory，因此 ClickHouse 也在 SQL 侧截为末条以收敛列表载荷
+		inputHistoryExpr = `CASE
+			WHEN object_type = 'realtime.turn' THEN input_history
+			WHEN isValidJSON(input_history) AND JSONType(input_history) = 'Array' AND JSONLength(input_history) > 0
+			THEN concat('[', JSONExtractRaw(input_history, -1), ']')
+			ELSE input_history END AS input_history`
 	default: // sqlite
 		// 预览优先取最后一条 user/assistant 条目：末条是工具输出且本次请求无
 		// assistant 文本时，UI 仍能回退到人类消息；找不到人类条目时回退末条；
@@ -1699,11 +1707,14 @@ func (s *RDBLogStore) responsesPreviewColumns() (responsesInputExpr, responsesOu
 			ELSE bifrost_safe_responses_output_preview(responses_output, %d) END AS responses_output`,
 			maxListOutputPreviewRunes)
 	case "clickhouse":
-		// ClickHouse: return the full history columns as-is. The last-message
-		// truncation optimization the SQLite/Postgres list path applies is
-		// deferred (correctness over payload size); hybrid offloading and
-		// content_summary already bound list payloads in practice.
-		responsesInputExpr = `responses_input_history AS responses_input_history`
+		// ClickHouse: extract the last message from JSON array histories while
+		// keeping realtime turns and non-array or invalid payloads untouched.
+		// 与 listSelectColumnsBase 的 ClickHouse 分支同语义，保持列表/session 一致
+		responsesInputExpr = `CASE
+			WHEN object_type = 'realtime.turn' THEN responses_input_history
+			WHEN isValidJSON(responses_input_history) AND JSONType(responses_input_history) = 'Array' AND JSONLength(responses_input_history) > 0
+			THEN concat('[', JSONExtractRaw(responses_input_history, -1), ']')
+			ELSE responses_input_history END AS responses_input_history`
 		responsesOutputExpr = `responses_output AS responses_output`
 	default: // sqlite
 		// 预览优先取最后一条 user/assistant 条目，超限时以保留原 role 的占位替代
