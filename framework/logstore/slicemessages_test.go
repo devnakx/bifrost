@@ -155,6 +155,60 @@ func TestSliceLogMessages(t *testing.T) {
 	}
 }
 
+// 生产行的 object_type 是 schemas.RequestType 的下划线形态（chat_completion 等），
+// 解析后的 passthrough 行也会被改写成该类型；消息分页与角色过滤对两者都必须生效。
+func TestSliceLogMessagesProductionObjectTypes(t *testing.T) {
+	tests := []struct {
+		name           string
+		object         string
+		passthrough    bool
+		log            func() *Log
+		wantTotal      int
+		wantUserBodies []string
+	}{
+		{name: "chat_completion", object: "chat_completion", log: chatLog, wantTotal: 4, wantUserBodies: []string{"user-0", "user-2"}},
+		{name: "chat_completion_stream", object: "chat_completion_stream", log: chatLog, wantTotal: 4, wantUserBodies: []string{"user-0", "user-2"}},
+		{name: "responses_stream", object: "responses_stream", log: responsesLog, wantTotal: 4, wantUserBodies: []string{"rin-0", "rin-1"}},
+		{
+			name:           "parsed passthrough stored as chat_completion",
+			object:         "chat_completion",
+			passthrough:    true,
+			log:            chatLog,
+			wantTotal:      4,
+			wantUserBodies: []string{"user-0", "user-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := tt.log()
+			l.Object = tt.object
+			l.IsPassthrough = tt.passthrough
+
+			full, total, err := SliceLogMessages(l, 0, 100)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if total != tt.wantTotal || len(full) != tt.wantTotal {
+				t.Fatalf("full = (%d, %d), want total %d", len(full), total, tt.wantTotal)
+			}
+
+			filtered, filteredTotal, err := SliceLogMessagesWithRoles(l, 0, 100, []string{"user"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if filteredTotal != len(tt.wantUserBodies) || len(filtered) != len(tt.wantUserBodies) {
+				t.Fatalf("filtered = (%d, %d), want total %d", len(filtered), filteredTotal, len(tt.wantUserBodies))
+			}
+			for i, sub := range tt.wantUserBodies {
+				if !contains(string(filtered[i]), sub) {
+					t.Errorf("message %d body %s missing %q", i, filtered[i], sub)
+				}
+			}
+		})
+	}
+}
+
 func TestSliceLogMessagesLatestFirst(t *testing.T) {
 	got, total, err := SliceLogMessagesLatestFirst(chatLog(), 0, 2)
 	if err != nil {

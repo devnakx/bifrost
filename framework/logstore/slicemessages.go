@@ -12,8 +12,10 @@ import (
 // SliceLogMessages 按 object_type 归一化日志的消息序列并返回分页切片与总数。
 //
 // 消息序列组成：
-//   - chat 类（chat.completion / chat.completion.chunk）：InputHistoryParsed + OutputMessageParsed
-//   - responses 类（response / responses / responses_stream）：ResponsesInputHistoryParsed + ResponsesOutputParsed
+//   - chat 类（chat_completion / chat_completion_stream，兼容旧值 chat.completion / chat.completion.chunk）：
+//     InputHistoryParsed + OutputMessageParsed
+//   - responses 类（responses / responses_stream，兼容旧值 response / response.completion.chunk）：
+//     ResponsesInputHistoryParsed + ResponsesOutputParsed
 //   - 其他 object 类型：空序列
 //
 // 分页语义：
@@ -51,15 +53,17 @@ func sliceLogMessages(l *Log, offset, limit int, latestFirst bool, roles []strin
 	}
 
 	var messages []any
+	// logs.object_type 存的是 schemas.RequestType 的值（下划线形态），
+	// 旧数据迁移前是点号形态；两种都要识别，否则消息分页对生产行恒为空。
 	switch l.Object {
-	case "chat.completion", "chat.completion.chunk":
+	case "chat_completion", "chat_completion_stream", "chat.completion", "chat.completion.chunk":
 		for i := range l.InputHistoryParsed {
 			messages = append(messages, &l.InputHistoryParsed[i])
 		}
 		if l.OutputMessageParsed != nil {
 			messages = append(messages, l.OutputMessageParsed)
 		}
-	case "response", "responses", "responses_stream":
+	case "responses", "responses_stream", "response", "response.completion.chunk":
 		for i := range l.ResponsesInputHistoryParsed {
 			messages = append(messages, &l.ResponsesInputHistoryParsed[i])
 		}
