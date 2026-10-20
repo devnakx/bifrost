@@ -21,7 +21,8 @@ COPY ui/ ./
 RUN npm run build-enterprise
 
 # --- Go 构建阶段：本地 go.work 编译二进制 ---
-FROM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
+# 镜像的 Go 版本必须 >= 各 go.mod 的 go 指令（当前 1.27.2），否则 GOTOOLCHAIN=local 下直接失败
+FROM golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
 WORKDIR /build
 
 # go-sqlite3 需要 CGO，编译器与链接器一并安装
@@ -50,6 +51,8 @@ RUN go work init && \
     done
 
 # 嵌入 UI 产物到 Go 二进制（//go:embed）
+# 先清掉宿主可能残留的旧产物，否则 COPY 目录会合并，旧哈希文件被一并嵌入
+RUN rm -rf ./transports/bifrost-http/ui
 COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
 
 # 动态链接构建：不加 -extldflags '-static'，以便运行时加载 .so 插件
