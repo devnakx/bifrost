@@ -4,11 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
+	"github.com/fasthttp/router"
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/providers/openai"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 	"github.com/valyala/fasthttp"
 )
 
@@ -472,4 +481,323 @@ func jsonEqual(a, b any) bool {
 	left, _ := json.Marshal(a)
 	right, _ := json.Marshal(b)
 	return bytes.Equal(left, right)
+}
+
+// speechTestAccount configures OpenAI and Azure providers whose endpoints point at a local
+// upstream, so speech routes run end to end without a live key. The Azure-style deployments
+// route always resolves to Azure, the plain speech route to the provider in the model prefix.
+type speechTestAccount struct {
+	baseURL string
+}
+
+func (a speechTestAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+	return []schemas.ModelProvider{schemas.OpenAI, schemas.Azure}, nil
+}
+
+func (a speechTestAccount) GetKeysForProvider(_ context.Context, p schemas.ModelProvider) ([]schemas.Key, error) {
+	key := schemas.Key{
+		ID:     "speech-test-key-" + string(p),
+		Value:  *schemas.NewSecretVar("sk-test-operator-key"),
+		Models: schemas.WhiteList{"*"},
+		Weight: 1.0,
+	}
+	switch p {
+	case schemas.OpenAI:
+	case schemas.Azure:
+		key.AzureKeyConfig = &schemas.AzureKeyConfig{Endpoint: *schemas.NewSecretVar(a.baseURL)}
+	default:
+		return nil, nil
+	}
+	return []schemas.Key{key}, nil
+}
+
+func (a speechTestAccount) GetConfigForProvider(p schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	if p != schemas.OpenAI && p != schemas.Azure {
+		return nil, fmt.Errorf("unsupported provider %s", p)
+	}
+	nc := schemas.DefaultNetworkConfig
+	if p == schemas.OpenAI {
+		nc.BaseURL = a.baseURL
+	}
+	return &schemas.ProviderConfig{
+		NetworkConfig:            nc,
+		ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
+	}, nil
+}
+
+// TestOpenAISpeechRoutesReturnRawAudio pins that every OpenAI-integration speech route
+// answers with the audio bytes, as the OpenAI and Azure OpenAI SDKs expect. The Azure-style
+// /openai/deployments/{deployment}/audio/speech route used to serialize the whole
+// BifrostSpeechResponse as JSON ({"audio":"<base64>"}) instead.
+func TestOpenAISpeechRoutesReturnRawAudio(t *testing.T) {
+	audio := []byte("ID3\x04\x00fake-mp3-frames")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write(audio)
+	}))
+	defer upstream.Close()
+
+	client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+		Account: speechTestAccount{baseURL: upstream.URL},
+		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+	})
+	require.NoError(t, err)
+	defer client.Shutdown()
+
+	r := router.New()
+	identity := func(next fasthttp.RequestHandler) fasthttp.RequestHandler { return next }
+	NewOpenAIRouter(client, &mockHandlerStore{}, nil, &testLogger{}).RegisterRoutes(r, identity)
+
+	for _, uri := range []string{
+		"/openai/v1/audio/speech",
+		"/openai/openai/deployments/gpt-4o-mini-tts/audio/speech?api-version=2025-04-01-preview",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			var ctx fasthttp.RequestCtx
+			ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+			ctx.Request.SetRequestURI(uri)
+			ctx.Request.Header.SetContentType("application/json")
+			ctx.Request.SetBodyString(`{"model":"openai/gpt-4o-mini-tts","input":"Hello from the harness.","voice":"alloy"}`)
+
+			r.Handler(&ctx)
+
+			require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "body: %s", ctx.Response.Body())
+			require.Contains(t, string(ctx.Response.Header.ContentType()), "audio/", "body: %.200s", ctx.Response.Body())
+			require.Equal(t, audio, ctx.Response.Body())
+		})
+	}
+}
+
+// azureDataSourcesJSON is an Azure "On Your Data" data_sources value, the
+// extension the Azure OpenAI SDK sends at the top level of a chat body.
+const azureDataSourcesJSON = `[{"type":"azure_search","parameters":{"endpoint":"https://unreachable.search.windows.net","index_name":"idx","authentication":{"type":"api_key","key":"k"}}}]`
+
+// chatUpstream records the last chat body the provider sent and answers it,
+// as SSE when the body asked to stream.
+type chatUpstream struct {
+	mu   sync.Mutex
+	path string
+	body []byte
+}
+
+func (u *chatUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	u.mu.Lock()
+	u.path, u.body = r.URL.Path, body
+	u.mu.Unlock()
+	var probe struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	if probe.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+}
+
+func (u *chatUpstream) last() (string, []byte) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.path, u.body
+}
+
+// TestAzureDeploymentChatForwardsUnknownTopLevelFields pins that the Azure
+// OpenAI SDK route /openai/deployments/{deployment}/chat/completions forwards
+// top-level fields Bifrost does not model, such as On Your Data data_sources,
+// to the Azure deployment, unary and streaming. They used to be dropped at
+// decode, so Azure answered 200 for a body it should have rejected. The plain
+// chat routes and a provider-prefixed deployment path keep dropping them.
+func TestAzureDeploymentChatForwardsUnknownTopLevelFields(t *testing.T) {
+	upstream := &chatUpstream{}
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+		Account: speechTestAccount{baseURL: server.URL},
+		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+	})
+	require.NoError(t, err)
+	defer client.Shutdown()
+
+	r := router.New()
+	identity := func(next fasthttp.RequestHandler) fasthttp.RequestHandler { return next }
+	NewOpenAIRouter(client, &mockHandlerStore{}, nil, &testLogger{}).RegisterRoutes(r, identity)
+
+	const deploymentURI = "/openai/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+	cases := []struct {
+		name        string
+		uri         string
+		body        string
+		headers     map[string]string
+		wantPath    string
+		wantFields  map[string]string
+		wantMissing []string
+	}{
+		{
+			name:       "azure deployment unary",
+			uri:        deploymentURI,
+			body:       `{"messages":[{"role":"user","content":"hi"}],"temperature":0.2,"data_sources":` + azureDataSourcesJSON + `,"x_future_field":{"a":1}}`,
+			wantPath:   "/openai/v1/chat/completions",
+			wantFields: map[string]string{"data_sources": azureDataSourcesJSON, "x_future_field": `{"a":1}`, "temperature": "0.2"},
+		},
+		{
+			name:       "azure deployment stream",
+			uri:        deploymentURI,
+			body:       `{"messages":[{"role":"user","content":"hi"}],"stream":true,"data_sources":` + azureDataSourcesJSON + `}`,
+			wantPath:   "/openai/v1/chat/completions",
+			wantFields: map[string]string{"data_sources": azureDataSourcesJSON, "stream": "true"},
+		},
+		{
+			name:        "azure deployment nested extra_params wins on conflict",
+			uri:         deploymentURI,
+			body:        `{"messages":[{"role":"user","content":"hi"}],"data_sources":` + azureDataSourcesJSON + `,"x_dup":"top","extra_params":{"x_dup":"nested"}}`,
+			headers:     map[string]string{"x-bf-passthrough-extra-params": "true"},
+			wantPath:    "/openai/v1/chat/completions",
+			wantFields:  map[string]string{"data_sources": azureDataSourcesJSON, "x_dup": `"nested"`},
+			wantMissing: []string{"extra_params"},
+		},
+		{
+			name:        "azure deployment without unknown fields",
+			uri:         deploymentURI,
+			body:        `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","fallbacks":["openai/gpt-4o"]}`,
+			wantPath:    "/openai/v1/chat/completions",
+			wantMissing: []string{"fallbacks", "extra_params"},
+		},
+		{
+			name:        "plain chat route keeps dropping unknown fields",
+			uri:         "/openai/v1/chat/completions",
+			body:        `{"model":"azure/gpt-4o","messages":[{"role":"user","content":"hi"}],"data_sources":` + azureDataSourcesJSON + `}`,
+			wantPath:    "/openai/v1/chat/completions",
+			wantMissing: []string{"data_sources"},
+		},
+		{
+			name:        "provider-prefixed deployment path does not forward Azure fields",
+			uri:         "/openai/openai/deployments/openai/gpt-4o/chat/completions?api-version=2024-10-21",
+			body:        `{"messages":[{"role":"user","content":"hi"}],"data_sources":` + azureDataSourcesJSON + `}`,
+			wantPath:    "/v1/chat/completions",
+			wantMissing: []string{"data_sources"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var ctx fasthttp.RequestCtx
+			ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+			ctx.Request.SetRequestURI(tc.uri)
+			ctx.Request.Header.SetContentType("application/json")
+			for k, v := range tc.headers {
+				ctx.Request.Header.Set(k, v)
+			}
+			ctx.Request.SetBodyString(tc.body)
+
+			r.Handler(&ctx)
+			respBody := string(ctx.Response.Body())
+			require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(), "body: %s", respBody)
+
+			path, sent := upstream.last()
+			require.Equal(t, tc.wantPath, path, "upstream body: %s", sent)
+			for field, want := range tc.wantFields {
+				got := gjson.GetBytes(sent, field)
+				require.True(t, got.Exists(), "%s missing from the provider body: %s", field, sent)
+				require.JSONEq(t, want, got.Raw, "%s in provider body: %s", field, sent)
+			}
+			for _, field := range tc.wantMissing {
+				require.False(t, gjson.GetBytes(sent, field).Exists(), "%s must not reach the provider: %s", field, sent)
+			}
+		})
+	}
+}
+
+// BenchmarkAzureEndpointPreHookChat measures the Azure deployments pre-hook on
+// a chat body with no unknown fields (the common case) and with data_sources.
+func BenchmarkAzureEndpointPreHookChat(b *testing.B) {
+	hook := AzureEndpointPreHook(&mockHandlerStore{})
+	bodies := map[string]string{
+		"known-only":   `{"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"}],"temperature":0.2,"max_tokens":64,"stream":true,"stream_options":{"include_usage":true}}`,
+		"data-sources": `{"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"}],"temperature":0.2,"max_tokens":64,"data_sources":` + azureDataSourcesJSON + `}`,
+	}
+	for _, name := range []string{"known-only", "data-sources"} {
+		body := []byte(bodies[name])
+		b.Run(name, func(b *testing.B) {
+			var ctx fasthttp.RequestCtx
+			ctx.Request.SetBody(body)
+			ctx.SetUserValue("deploymentPath", "gpt-4o/chat/completions")
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				bctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+				req := &openai.OpenAIChatRequest{}
+				if err := hook(&ctx, bctx, req); err != nil {
+					b.Fatal(err)
+				}
+				bctx.Cancel()
+			}
+		})
+	}
+}
+
+// A request Bifrost converted to another API (chat served through Responses, text
+// through chat, Responses through chat) carries that API's raw upstream bytes. The
+// OpenAI raw passthrough must not echo them: a chat client reading
+// {"type":"response.created",...} on a chat stream fails its schema check. Every
+// chat, text and Responses converter on every OpenAI route is checked, unary and
+// streaming, plus the unconverted control that must still pass raw bytes through.
+func TestOpenAIRawPassthroughSkipsConvertedRequests(t *testing.T) {
+	foreignRaw := `{"type":"response.created","response":{"id":"resp_1","object":"response"}}`
+	extra := func(converted schemas.RequestType) schemas.BifrostResponseExtraFields {
+		return schemas.BifrostResponseExtraFields{Provider: schemas.OpenAI, RawResponse: foreignRaw, ConvertedRequestType: converted}
+	}
+	checked := 0
+	for _, prefix := range []string{"", "/openai"} {
+		for _, route := range CreateOpenAIRouteConfigs(prefix, &mockHandlerStore{}) {
+			for _, converted := range []schemas.RequestType{schemas.ResponsesRequest, ""} {
+				name := route.Path + "/converted=" + string(converted)
+				wantRaw := converted == ""
+				check := func(kind string, got interface{}) {
+					t.Helper()
+					checked++
+					if wantRaw {
+						require.Equal(t, foreignRaw, got, "%s %s: unconverted response must pass raw bytes through", name, kind)
+					} else {
+						require.NotEqual(t, foreignRaw, got, "%s %s: converted response echoed the other API's raw bytes", name, kind)
+					}
+				}
+				if route.ChatResponseConverter != nil {
+					got, err := route.ChatResponseConverter(nil, &schemas.BifrostChatResponse{ExtraFields: extra(converted)})
+					require.NoError(t, err)
+					check("chat", got)
+				}
+				if route.TextResponseConverter != nil {
+					got, err := route.TextResponseConverter(nil, &schemas.BifrostTextCompletionResponse{ExtraFields: extra(converted)})
+					require.NoError(t, err)
+					check("text", got)
+				}
+				if route.ResponsesResponseConverter != nil {
+					got, err := route.ResponsesResponseConverter(nil, &schemas.BifrostResponsesResponse{ExtraFields: extra(converted)})
+					require.NoError(t, err)
+					check("responses", got)
+				}
+				if sc := route.StreamConfig; sc != nil {
+					if sc.ChatStreamResponseConverter != nil {
+						_, got, err := sc.ChatStreamResponseConverter(nil, &schemas.BifrostChatResponse{ExtraFields: extra(converted)})
+						require.NoError(t, err)
+						check("chat stream", got)
+					}
+					if sc.TextStreamResponseConverter != nil {
+						_, got, err := sc.TextStreamResponseConverter(nil, &schemas.BifrostTextCompletionResponse{ExtraFields: extra(converted)})
+						require.NoError(t, err)
+						check("text stream", got)
+					}
+					if sc.ResponsesStreamResponseConverter != nil {
+						_, got, err := sc.ResponsesStreamResponseConverter(nil, &schemas.BifrostResponsesStreamResponse{Type: schemas.ResponsesStreamResponseTypeCreated, ExtraFields: extra(converted)})
+						require.NoError(t, err)
+						check("responses stream", got)
+					}
+				}
+			}
+		}
+	}
+	require.Positive(t, checked, "no OpenAI chat/text/responses converters found")
 }

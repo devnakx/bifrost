@@ -395,7 +395,7 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 		baseQuery = baseQuery.Where("agent_correlation_id = ?", filters.AgentCorrelationID)
 	}
 	if len(filters.Objects) > 0 {
-		baseQuery = baseQuery.Where("object_type IN ?", filters.Objects)
+		baseQuery = applyObjectsFilter(baseQuery, filters.Objects)
 	}
 	if filters.ParentRequestID != "" {
 		// A row is never its own child: parent_request_id is client-settable, and
@@ -545,6 +545,9 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 			baseQuery = baseQuery.Where(expr+" IN ?", codes)
 		}
 	}
+	if len(filters.GuardrailOutcomes) > 0 {
+		baseQuery = s.applyGuardrailOutcomeFilter(baseQuery, filters.GuardrailOutcomes)
+	}
 	if filters.ContentSearch != "" {
 		dialect := s.db.Dialector.Name()
 		if dialect == "postgres" {
@@ -598,6 +601,44 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 		}
 	}
 	return baseQuery
+}
+
+// Guardrail outcome values accepted by SearchFilters.GuardrailOutcomes.
+const (
+	GuardrailOutcomeBlocked  = "blocked"
+	GuardrailOutcomeDetected = "detected"
+)
+
+// guardrailInterventionErrorType is the error type the guardrails plugin
+// returns when it blocks a request. Matching it keeps blocks logged before
+// interventions were recorded in guardrail_debug visible to the filter.
+const guardrailInterventionErrorType = "guardrail_intervention"
+
+// applyGuardrailOutcomeFilter keeps rows a guardrail blocked or flagged. Only
+// known outcomes reach the SQL; an unsupported dialect or an all-unknown list
+// matches nothing rather than silently returning every log.
+func (s *RDBLogStore) applyGuardrailOutcomeFilter(baseQuery *gorm.DB, outcomes []string) *gorm.DB {
+	dialect := s.db.Dialector.Name()
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 1)
+	if slices.Contains(outcomes, GuardrailOutcomeBlocked) {
+		if expr, ok := jsonObjectFieldExpr(dialect, "error_details", "error", "type"); ok {
+			clauses = append(clauses, expr+" = ?")
+			args = append(args, guardrailInterventionErrorType)
+		}
+		if expr, ok := jsonArrayNotEmptyExpr(dialect, "guardrail_debug", "interventions"); ok {
+			clauses = append(clauses, expr)
+		}
+	}
+	if slices.Contains(outcomes, GuardrailOutcomeDetected) {
+		if expr, ok := jsonArrayNotEmptyExpr(dialect, "guardrail_debug", "detections"); ok {
+			clauses = append(clauses, expr)
+		}
+	}
+	if len(clauses) == 0 {
+		return baseQuery.Where("1 = 0")
+	}
+	return baseQuery.Where("("+strings.Join(clauses, " OR ")+")", args...)
 }
 
 // applyRootsOnlyFilter hides rows that nest under another row already present in
@@ -802,6 +843,46 @@ func (s *RDBLogStore) Update(ctx context.Context, id string, entry any) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// BatchUpdate applies partial updates to multiple existing log rows in a single
+// transaction. Each entry must carry an ID; only its non-zero fields are written
+// (GORM Updates semantics), so output columns can be reconciled onto an existing
+// row while its input columns are left intact.
+//
+// Unlike the single-row Update, a row that does not match is silently skipped
+// rather than returning ErrNotFound: this is a best-effort batch reconciliation
+// (e.g. evicted-pending recovery), and the absence of a row is not a failure of
+// the whole batch. Callers that enqueue a partial-row insert before the matching
+// update rely on insert-before-update ordering so the row is present by the time
+// the update runs.
+func (s *RDBLogStore) BatchUpdate(ctx context.Context, entries []*Log) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, entry := range entries {
+			if entry == nil || entry.ID == "" {
+				continue
+			}
+			serialized, err := serializeLogUpdateEntry(entry)
+			if err != nil {
+				return err
+			}
+			// content_summary is omitted: SerializeFields regenerates it from the
+			// entry's own payload, and an output-only entry would otherwise replace
+			// the input summary already on the row.
+			if err := tx.Model(&Log{}).Where("id = ?", entry.ID).Omit("content_summary").Updates(serialized).Error; err != nil {
+				return err
+			}
+			// Updates skips zero values, so a final "visible" (false) decision
+			// would never clear a hidden flag saved earlier; write it explicitly.
+			if err := tx.Model(&Log{}).Where("id = ?", entry.ID).UpdateColumn("content_hidden", entry.ContentHidden).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // BulkUpdateCost updates log costs in bulk, using a PostgreSQL-specific batched
@@ -1579,7 +1660,7 @@ func (s *RDBLogStore) sessionSelectColumns() string {
 // 标量列 + chat 输入预览表达式 + chat 输出预览表达式 + image_edit prompt 裁剪
 func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outputMessageExpr, imageEditExpr string) {
 	baseCols = strings.Join([]string{
-		"id", "parent_request_id", "timestamp", "object_type", "provider", "model", "alias",
+		"id", "parent_request_id", "timestamp", "object_type", "is_passthrough", "provider", "model", "alias",
 		"canonical_model_name", "alias_model_family", "server_side_fallback_model", "served_model",
 		"number_of_retries", "fallback_index",
 		"selected_key_id", "selected_key_name",
@@ -1599,6 +1680,7 @@ func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outpu
 		// rows it can carry the provider's full (unbounded) error payload, and 25+ such
 		// rows can push the /api/logs response past Cloud Run's 32MB body limit (500s).
 		// The full error is still served by the detail endpoint (GetLog / GET /api/logs/{id}).
+		// Only guardrail blocks, whose errors are bounded, are listed (see below).
 		"latency", "upstream_latency", "overhead_latency", "token_usage", "cost", "status", "stream",
 		// 列表行携带最新一条预览，截断 128；全量可搜索文本保留在存储列，
 		// 由 content_search 直接过滤，不进入投影
@@ -1616,7 +1698,21 @@ func (s *RDBLogStore) listSelectColumnsBase() (baseCols, inputHistoryExpr, outpu
 		"has_object", "content_hidden",
 		"service_tier", "speed", "inference_geo",
 		"created_at",
+		// guardrail_debug holds only sanitized rule metadata (never matched
+		// text), so it stays small; the Guardrail Incidents view reads the
+		// rule, guardrail, phase and action of each row from it.
+		"guardrail_debug",
 	}, ", ")
+
+	// A guardrail block's error_details is the short message the guardrails
+	// plugin writes, unlike a provider error, so it is safe to list. It lets a
+	// block logged before interventions were recorded still name its reason.
+	guardrailErrorExpr := "NULL AS error_details"
+	if typeExpr, ok := jsonObjectFieldExpr(s.db.Dialector.Name(), "error_details", "error", "type"); ok {
+		guardrailErrorExpr = fmt.Sprintf("CASE WHEN %s = '%s' THEN error_details ELSE NULL END AS error_details",
+			typeExpr, guardrailInterventionErrorType)
+	}
+	baseCols += ", " + guardrailErrorExpr
 
 	switch s.db.Dialector.Name() {
 	case "postgres":
@@ -1850,6 +1946,21 @@ func billingScalarSelectColumns() string {
 // from a modality payload column (audio, image, video, OCR output). Such a row
 // read with PaginationOptions.OmitBillingPayloads must be re-read with the full
 // billing projection before it is priced.
+// applyObjectsFilter narrows to the requested request types. A passthrough row is stored under its
+// inferred type and tagged is_passthrough, so the passthrough types also match on the tag:
+// passthrough matches every passthrough call (streamed or not, and rows written as
+// passthrough_stream before the tag existed), while passthrough_stream on its own matches only the
+// streamed ones.
+func applyObjectsFilter(q *gorm.DB, objects []string) *gorm.DB {
+	switch {
+	case slices.Contains(objects, "passthrough"):
+		return q.Where("(object_type IN ? OR object_type = ? OR is_passthrough = ?)", objects, "passthrough_stream", true)
+	case slices.Contains(objects, "passthrough_stream"):
+		return q.Where("(object_type IN ? OR (is_passthrough = ? AND stream = ?))", objects, true, true)
+	}
+	return q.Where("object_type IN ?", objects)
+}
+
 func BillingPayloadRequired(objectType string) bool {
 	return billingPayloadColumnFor(objectType) != ""
 }
@@ -2276,6 +2387,20 @@ func (s *RDBLogStore) GetTokenHistogram(ctx context.Context, filters SearchFilte
 	}, nil
 }
 
+// throughputObjectTypes are the inference request types counted in tokens/sec; list_models polls and other zero-output calls would only dilute it.
+var throughputObjectTypes = []string{
+	string(schemas.TextCompletionRequest),
+	string(schemas.TextCompletionStreamRequest),
+	string(schemas.ChatCompletionRequest),
+	string(schemas.ChatCompletionStreamRequest),
+	string(schemas.ResponsesRequest),
+	string(schemas.ResponsesStreamRequest),
+	string(schemas.WebSocketResponsesRequest),
+}
+
+// throughputObjectTypesSQL is throughputObjectTypes as a SQL IN list for CASE expressions.
+var throughputObjectTypesSQL = "'" + strings.Join(throughputObjectTypes, "', '") + "'"
+
 // tokensPerSecond computes aggregate token-generation throughput for a bucket:
 // total completion tokens divided by total latency in seconds. latencyMs is the
 // sum of per-request latencies (milliseconds). Returns 0 when latency is absent.
@@ -2289,7 +2414,7 @@ func tokensPerSecond(completionTokens int64, latencyMs float64) float64 {
 // GetThroughputHistogram returns time-bucketed token-generation throughput
 // (tokens/sec) for the given filters. TokensPerSecond is the aggregate rate for
 // each bucket: SUM(completion_tokens) / (SUM(latency_ms)/1000), computed over
-// terminal rows that recorded a latency > 0.
+// successful inference rows (throughputObjectTypes) that recorded a latency > 0.
 func (s *RDBLogStore) GetThroughputHistogram(ctx context.Context, filters SearchFilters, bucketSizeSeconds int64) (*ThroughputHistogramResult, error) {
 	if bucketSizeSeconds <= 0 {
 		bucketSizeSeconds = 3600 // Default to 1 hour
@@ -2314,6 +2439,7 @@ func (s *RDBLogStore) GetThroughputHistogram(ctx context.Context, filters Search
 	baseQuery = baseQuery.Where("status = ?", "success")
 	// Only rows with a measured latency contribute to throughput.
 	baseQuery = baseQuery.Where("latency > 0")
+	baseQuery = baseQuery.Where("object_type IN ?", throughputObjectTypes)
 
 	var results []struct {
 		BucketTimestamp  int64   `gorm:"column:bucket_timestamp"`
@@ -2396,6 +2522,7 @@ func (s *RDBLogStore) GetProviderThroughputHistogram(ctx context.Context, filter
 	// Successful requests only — see GetThroughputHistogram.
 	baseQuery = baseQuery.Where("status = ?", "success")
 	baseQuery = baseQuery.Where("latency > 0")
+	baseQuery = baseQuery.Where("object_type IN ?", throughputObjectTypes)
 
 	var results []struct {
 		BucketTimestamp  int64   `gorm:"column:bucket_timestamp"`
@@ -3051,8 +3178,8 @@ func (s *RDBLogStore) GetModelRankings(ctx context.Context, filters SearchFilter
 		SUM(total_tokens) as total_tokens,
 		COALESCE(SUM(cost), 0) as total_cost,
 		AVG(latency) as avg_latency,
-		COALESCE(SUM(CASE WHEN status = 'success' AND latency > 0 THEN completion_tokens ELSE 0 END), 0) as tp_completion_tokens,
-		COALESCE(SUM(CASE WHEN status = 'success' AND latency > 0 THEN latency ELSE 0 END), 0) as tp_latency_ms
+		COALESCE(SUM(CASE WHEN status = 'success' AND latency > 0 AND object_type IN (` + throughputObjectTypesSQL + `) THEN completion_tokens ELSE 0 END), 0) as tp_completion_tokens,
+		COALESCE(SUM(CASE WHEN status = 'success' AND latency > 0 AND object_type IN (` + throughputObjectTypesSQL + `) THEN latency ELSE 0 END), 0) as tp_latency_ms
 	`
 	// Only the current-period query scans canonical_name and the per-category cost
 	// split; keeping them out of the shared clause spares the previous-period
@@ -5483,7 +5610,13 @@ func (s *RDBLogStore) ListAgentLogHistory(ctx context.Context, filter AgentLogHi
 		return nil, fmt.Errorf("logstore: Agent history offset must be non-negative")
 	}
 
+	if filter.SessionGroupingActive() {
+		filter.RecordKind = []string{"request"}
+	}
 	query := s.applyAgentHistoryFilters(s.ScopedDB(ctx).Model(&AgentLog{}), filter)
+	if filter.SessionGroupingActive() {
+		query = s.applyAgentSessionRootFilter(query, filter)
+	}
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -5507,7 +5640,60 @@ func (s *RDBLogStore) ListAgentLogHistory(ctx context.Context, filter AgentLogHi
 	for i := range rows {
 		deserializeAgentSummaryGovernance(&rows[i])
 	}
+	if filter.SessionGroupingActive() {
+		if err := s.attachAgentSessionCounts(ctx, rows, filter); err != nil {
+			return nil, err
+		}
+	}
 	return &AgentLogHistoryResult{Logs: rows, Pagination: pagination}, nil
+}
+
+// applyAgentSessionRootFilter keeps the earliest matching row per context before
+// pagination. The peer population has the same filters and access scope as the
+// outer query. Missing context IDs remain independent rows.
+func (s *RDBLogStore) applyAgentSessionRootFilter(query *gorm.DB, filter AgentLogHistoryFilter) *gorm.DB {
+	peers := s.applyAgentHistoryFilters(s.ScopedDB(query.Statement.Context).Model(&AgentLog{}), filter).
+		Where("context_id IS NOT NULL AND context_id <> ''")
+	var roots *gorm.DB
+	if s.db.Dialector.Name() == "clickhouse" {
+		roots = peers.Select("argMin(id, (timestamp, id)) AS id").Group("context_id")
+	} else {
+		ranked := peers.Select("id, ROW_NUMBER() OVER (PARTITION BY context_id ORDER BY timestamp ASC, id ASC) AS session_rank")
+		roots = s.db.Table("(?) AS agent_session_roots", ranked).Select("id").Where("session_rank = 1")
+	}
+	return query.Where("(context_id IS NULL OR context_id = '' OR id IN (?))", roots)
+}
+
+// attachAgentSessionCounts attaches the number of other matching operations to
+// each listed context root, without loading payloads or counting stream events.
+func (s *RDBLogStore) attachAgentSessionCounts(ctx context.Context, rows []AgentLogSummary, filter AgentLogHistoryFilter) error {
+	contextIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.ContextID != nil && *row.ContextID != "" {
+			contextIDs = append(contextIDs, *row.ContextID)
+		}
+	}
+	if len(contextIDs) == 0 {
+		return nil
+	}
+	var counts []struct {
+		ContextID string
+		Count     int64
+	}
+	query := s.applyAgentHistoryFilters(s.ScopedDB(ctx).Model(&AgentLog{}), filter)
+	if err := query.Where("context_id IN ?", contextIDs).Select("context_id, COUNT(*) AS count").Group("context_id").Scan(&counts).Error; err != nil {
+		return err
+	}
+	byContext := make(map[string]int64, len(counts))
+	for _, count := range counts {
+		byContext[count.ContextID] = count.Count - 1
+	}
+	for i := range rows {
+		if rows[i].ContextID != nil {
+			rows[i].SessionChildCount = byContext[*rows[i].ContextID]
+		}
+	}
+	return nil
 }
 
 // ListAgentLogOperations returns a bounded page of request rows with correlated events.
@@ -5574,7 +5760,9 @@ func buildAgentLogOperations(summaries []AgentLogSummary, rows []AgentLog, pagin
 		if request == nil {
 			continue
 		}
-		operations = append(operations, newAgentLogOperation(request, rowsByRequestID[summary.RequestID]))
+		operation := newAgentLogOperation(request, rowsByRequestID[summary.RequestID])
+		operation.SessionChildCount = summary.SessionChildCount
+		operations = append(operations, operation)
 	}
 	return &AgentLogOperationResult{Logs: operations, Pagination: pagination}
 }

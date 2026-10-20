@@ -963,17 +963,18 @@ func TestToOpenAIResponsesRequest_GPTOSS_SummaryToContentBlocks(t *testing.T) {
 					}
 				}
 
-				// Verify that original message fields are preserved.
-				// Note: Status is stripped by the sanitizer for all item types,
-				// including message types, since OpenAI rejects status on input.
+				// Verify that original message fields are preserved. An assistant message
+				// that keeps its id is a ResponseOutputMessageParam, so its status is
+				// required and kept alongside the id (#8593).
 				if tt.message.ID != nil && (resultMsg.ID == nil || *resultMsg.ID != *tt.message.ID) {
 					t.Errorf("Expected ID to be preserved")
 				}
 				if tt.message.Type != nil && (resultMsg.Type == nil || *resultMsg.Type != *tt.message.Type) {
 					t.Errorf("Expected Type to be preserved")
 				}
-				if resultMsg.Status != nil {
-					t.Errorf("Expected Status to be stripped (OpenAI rejects status on input)")
+				if tt.message.ID != nil && tt.message.Status != nil &&
+					(resultMsg.Status == nil || *resultMsg.Status != *tt.message.Status) {
+					t.Errorf("Expected Status to be preserved with the ID on an assistant output message")
 				}
 			} else {
 				// For other cases, verify message is preserved as-is
@@ -2778,6 +2779,32 @@ func TestToOpenAIResponsesRequest_StripsGeminiResidueFromResponsesInput(t *testi
 			origMutable: true,
 		},
 		{
+			// An assistant message with an id is a ResponseOutputMessageParam, where id and
+			// status are both required. Keeping the id while dropping the status leaves an
+			// item that matches neither input shape, which strict validators reject (#8593).
+			name: "status kept on assistant output message with id",
+			input: schemas.ResponsesMessage{
+				Type:   &messageType,
+				Role:   &assistant,
+				ID:     schemas.Ptr("msg_replayed"),
+				Status: schemas.Ptr("completed"),
+				Content: &schemas.ResponsesMessageContent{
+					ContentBlocks: []schemas.ResponsesMessageContentBlock{
+						{Type: schemas.ResponsesOutputMessageContentTypeText, Text: schemas.Ptr("hello")},
+					},
+				},
+			},
+			wantWire: func(t *testing.T, item map[string]json.RawMessage) {
+				if string(item["id"]) != `"msg_replayed"` {
+					t.Errorf("id: got %s, want \"msg_replayed\"", item["id"])
+				}
+				if string(item["status"]) != `"completed"` {
+					t.Errorf("status: got %s, want \"completed\" (id without status is not a valid input item)", item["status"])
+				}
+			},
+			origMutable: true,
+		},
+		{
 			name: "status stripped from reasoning",
 			input: schemas.ResponsesMessage{
 				Type:   &reasoningType,
@@ -3517,6 +3544,18 @@ func TestSamplingParamGateReadsDatasheet(t *testing.T) {
 			require.False(t, samplingParamUnsupported(caps, field, model, "none"))
 			require.True(t, samplingParamUnsupported(caps, field, model, "low"), "rejected once reasoning is on")
 		}
+	})
+
+	t.Run("default_reasoning_effort_row_drives_omitted_effort", func(t *testing.T) {
+		const sol = "gpt-5.6-sol"
+		installCapabilityRecord(t, sol, &schemas.ModelCapabilities{DefaultReasoningEffort: schemas.Ptr(schemas.ReasoningEffortNone)})
+		require.False(t, samplingParamUnsupported(schemas.ResolveModelCaps(schemas.OpenAI, sol), schemas.FieldTemperature, sol, ""),
+			"a row defaulting to none keeps sampling fields when effort is omitted")
+
+		const g54 = "gpt-5.4"
+		installCapabilityRecord(t, g54, &schemas.ModelCapabilities{DefaultReasoningEffort: schemas.Ptr(schemas.ReasoningEffortMedium)})
+		require.True(t, samplingParamUnsupported(schemas.ResolveModelCaps(schemas.OpenAI, g54), schemas.FieldTemperature, g54, ""),
+			"a row defaulting to medium strips them")
 	})
 
 	t.Run("outright_entry_beats_name_fallback", func(t *testing.T) {

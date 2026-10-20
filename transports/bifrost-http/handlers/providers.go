@@ -21,7 +21,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
-	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
 
@@ -115,7 +115,7 @@ const (
 // ProviderResponse represents the response for provider operations
 type ProviderResponse struct {
 	Name                     schemas.ModelProvider            `json:"name"`
-	NetworkConfig            schemas.NetworkConfig            `json:"network_config"`                   // Network-related settings
+	NetworkConfig            ProviderNetworkConfigResponse    `json:"network_config"`                   // Network-related settings
 	ConcurrencyAndBufferSize schemas.ConcurrencyAndBufferSize `json:"concurrency_and_buffer_size"`      // Concurrency settings
 	ProxyConfig              *schemas.ProxyConfig             `json:"proxy_config"`                     // Proxy configuration
 	SendBackRawRequest       bool                             `json:"send_back_raw_request"`            // Include raw request in BifrostResponse
@@ -125,11 +125,37 @@ type ProviderResponse struct {
 	CustomProviderConfig     *schemas.CustomProviderConfig    `json:"custom_provider_config,omitempty"` // Custom provider configuration
 	OpenAIConfig             *schemas.OpenAIConfig            `json:"openai_config,omitempty"`          // OpenAI-specific configuration
 	PromptCache              *schemas.PromptCacheConfig       `json:"prompt_cache,omitempty"`           // Prompt-cache breakpoint injection
-	InjectedTools            *schemas.InjectedToolsConfig     `json:"injected_tools,omitempty"`         // MCP tools injected and auto-executed server side
+	InjectedTools            []schemas.InjectedTool           `json:"injected_tools,omitempty"`         // MCP tools injected and auto-executed server side
 	ProviderStatus           ProviderStatus                   `json:"provider_status"`                  // Health/initialization status of the provider
 	Status                   string                           `json:"status,omitempty"`                 // Operational status (e.g., list_models_failed)
 	Description              string                           `json:"description,omitempty"`            // Error/status description
 	ConfigHash               string                           `json:"config_hash,omitempty"`            // Hash of config.json version, used for change detection
+}
+
+// ProviderNetworkConfigResponse is a provider's network config as the API returns it: the
+// stored shape, where extra_headers stays a string map, plus extra_headers_secret_vars, the
+// same headers as SecretVar objects so clients can tell literals from env/vault references.
+// The extra field exists only in responses; it is never stored or hashed.
+type ProviderNetworkConfigResponse struct {
+	schemas.NetworkConfig
+}
+
+// MarshalJSON emits the stored NetworkConfig JSON with extra_headers_secret_vars added.
+func (r ProviderNetworkConfigResponse) MarshalJSON() ([]byte, error) {
+	data, err := json.Marshal(r.NetworkConfig)
+	if err != nil || len(r.ExtraHeaders) == 0 {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	secretVars, err := json.Marshal(r.ExtraHeaders)
+	if err != nil {
+		return nil, err
+	}
+	fields["extra_headers_secret_vars"] = secretVars
+	return json.Marshal(fields)
 }
 
 // ListProvidersResponse represents the response for listing all providers
@@ -156,7 +182,7 @@ type providerCreatePayload struct {
 	CustomProviderConfig     *schemas.CustomProviderConfig     `json:"custom_provider_config,omitempty"`
 	OpenAIConfig             *schemas.OpenAIConfig             `json:"openai_config,omitempty"`  // OpenAI-specific configuration
 	PromptCache              *schemas.PromptCacheConfig        `json:"prompt_cache,omitempty"`   // Prompt-cache breakpoint injection
-	InjectedTools            *schemas.InjectedToolsConfig      `json:"injected_tools,omitempty"` // MCP tools injected and auto-executed server side
+	InjectedTools            []schemas.InjectedTool            `json:"injected_tools,omitempty"` // MCP tools injected and auto-executed server side
 }
 
 type providerUpdatePayload struct {
@@ -170,7 +196,7 @@ type providerUpdatePayload struct {
 	CustomProviderConfig     *schemas.CustomProviderConfig    `json:"custom_provider_config,omitempty"`
 	OpenAIConfig             *schemas.OpenAIConfig            `json:"openai_config,omitempty"`  // OpenAI-specific configuration
 	PromptCache              *schemas.PromptCacheConfig       `json:"prompt_cache,omitempty"`   // Prompt-cache breakpoint injection
-	InjectedTools            *schemas.InjectedToolsConfig     `json:"injected_tools,omitempty"` // MCP tools injected and auto-executed server side
+	InjectedTools            []schemas.InjectedTool           `json:"injected_tools,omitempty"` // MCP tools injected and auto-executed server side
 }
 
 // applyProviderConfigUpdates copies onto config only the nested config blocks the
@@ -333,10 +359,21 @@ func (h *ProviderHandler) getProvider(ctx *fasthttp.RequestCtx) {
 
 // addProvider handles POST /api/providers - Add a new provider
 // NOTE: This only gets called when a new custom provider is added
+// sendPayloadDecodeError rejects a provider write body the typed payload cannot decode.
+// An injected_tools value of the wrong shape (the old object form, a non-array) is one
+// such body, and its own message says what to fix instead of a generic one.
+func sendPayloadDecodeError(ctx *fasthttp.RequestCtx) {
+	if err := lib.ValidateInjectedToolsBody(ctx.PostBody()); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid injected tools config: %v", err))
+		return
+	}
+	SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+}
+
 func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 	var payload providerCreatePayload
 	if err := sonic.Unmarshal(ctx.PostBody(), &payload); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		sendPayloadDecodeError(ctx)
 		return
 	}
 	// Validate provider
@@ -376,6 +413,11 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 	}
 	// Validate retry backoff values if NetworkConfig is provided
 	if payload.NetworkConfig != nil {
+		// A new provider has no stored headers, so a masked value would be saved as-is
+		if _, err := schemas.RestoreRedactedExtraHeaders(payload.NetworkConfig.ExtraHeaders, nil); err != nil {
+			SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+			return
+		}
 		if err := validateRetryBackoff(payload.NetworkConfig); err != nil {
 			SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid retry backoff: %v", err))
 			return
@@ -477,22 +519,10 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 	redactedConfig, err := h.inMemoryStore.GetProviderConfigRedacted(payload.Provider)
 	if err != nil {
 		logger.Warn("Failed to get redacted config for provider %s: %v", payload.Provider, err)
-		// Fall back to the raw config (no keys)
-		response := h.getProviderResponseFromConfig(payload.Provider, configstore.ProviderConfig{
-			NetworkConfig:            config.NetworkConfig,
-			ConcurrencyAndBufferSize: config.ConcurrencyAndBufferSize,
-			ProxyConfig:              config.ProxyConfig,
-			SendBackRawRequest:       config.SendBackRawRequest,
-			SendBackRawResponse:      config.SendBackRawResponse,
-			StoreRawRequestResponse:  config.StoreRawRequestResponse,
-			IgnoreProviderCost:       config.IgnoreProviderCost,
-			CustomProviderConfig:     config.CustomProviderConfig,
-			OpenAIConfig:             config.OpenAIConfig,
-			PromptCache:              config.PromptCache,
-			InjectedTools:            config.InjectedTools,
-			Status:                   config.Status,
-			Description:              config.Description,
-		}, ProviderStatusActive)
+		// Fall back to the saved config, redacted and without keys
+		sanitized := config.Redacted()
+		sanitized.Keys = nil
+		response := h.getProviderResponseFromConfig(payload.Provider, *sanitized, ProviderStatusActive)
 		SendJSON(ctx, response)
 		return
 	}
@@ -521,7 +551,7 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 	}{}
 
 	if err := sonic.Unmarshal(ctx.PostBody(), &payload); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
+		sendPayloadDecodeError(ctx)
 		return
 	}
 
@@ -650,12 +680,22 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 	}
 
 	config.ConcurrencyAndBufferSize = &payload.ConcurrencyAndBufferSize
-	// Merge network config - restore ca_cert_pem if the redacted placeholder was sent back
+	// Merge network config - restore ca_cert_pem and extra header values if the redacted placeholders were sent back
 	if oldConfigRaw.NetworkConfig != nil && oldRedactedConfig.NetworkConfig != nil && nc.CACertPEM != nil {
 		if nc.CACertPEM.IsRedacted() && nc.CACertPEM.Equals(oldRedactedConfig.NetworkConfig.CACertPEM) {
 			nc.CACertPEM = oldConfigRaw.NetworkConfig.CACertPEM
 		}
 	}
+	var storedHeaders map[string]schemas.SecretVar
+	if oldConfigRaw.NetworkConfig != nil {
+		storedHeaders = oldConfigRaw.NetworkConfig.ExtraHeaders
+	}
+	restoredHeaders, err := schemas.RestoreRedactedExtraHeaders(nc.ExtraHeaders, storedHeaders)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	nc.ExtraHeaders = restoredHeaders
 	config.NetworkConfig = &nc
 	// Merge proxy config - preserve secrets if redacted values were sent back
 	if payload.ProxyConfig != nil && oldConfigRaw.ProxyConfig != nil && oldRedactedConfig.ProxyConfig != nil {
@@ -741,22 +781,10 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 	redactedConfig, err := h.inMemoryStore.GetProviderConfigRedacted(provider)
 	if err != nil {
 		logger.Warn("Failed to get redacted config for provider %s: %v", provider, err)
-		// Fall back to sanitized config (no keys)
-		response := h.getProviderResponseFromConfig(provider, configstore.ProviderConfig{
-			NetworkConfig:            config.NetworkConfig,
-			ConcurrencyAndBufferSize: config.ConcurrencyAndBufferSize,
-			ProxyConfig:              config.ProxyConfig,
-			SendBackRawRequest:       config.SendBackRawRequest,
-			SendBackRawResponse:      config.SendBackRawResponse,
-			StoreRawRequestResponse:  config.StoreRawRequestResponse,
-			IgnoreProviderCost:       config.IgnoreProviderCost,
-			CustomProviderConfig:     config.CustomProviderConfig,
-			OpenAIConfig:             config.OpenAIConfig,
-			PromptCache:              config.PromptCache,
-			InjectedTools:            config.InjectedTools,
-			Status:                   config.Status,
-			Description:              config.Description,
-		}, ProviderStatusActive)
+		// Fall back to the saved config, redacted and without keys
+		sanitized := config.Redacted()
+		sanitized.Keys = nil
+		response := h.getProviderResponseFromConfig(provider, *sanitized, ProviderStatusActive)
 		SendJSON(ctx, response)
 		return
 	}
@@ -1123,26 +1151,48 @@ func toPricingOverrideSummary(o modelcatalog.PricingOverride) ModelPricingOverri
 
 // supportsDecisions reports whether the listed model serves decisions natively,
 // by the rule the provider's Decision call gates on, so the listing neither
-// offers a model the request would reject nor hides one it would serve: none
-// on a custom provider whose allowed requests exclude decisions, every model
-// of a Typesafe-based provider (Typesafe, or a custom provider on its base
-// serving Laya, Nimble, or Clef), a TypeSafe System One model on OpenRouter,
-// and otherwise a model the datasheet (or, without a row, the name-based
-// fallback) marks supports_decisions. A key alias is checked as the model it
-// points at, as the request path checks it.
+// offers a model the request would reject nor hides one it would serve. A
+// custom provider is gated by its allowed requests alone: every model when it
+// allows decisions on a base that serves them (Typesafe, serving Laya, Nimble,
+// or Clef, or OpenAI, exposing /v1/decisions), since its server rejects a
+// model it does not serve. Typesafe lists every model, and any other provider
+// a model the datasheet marks supports_decisions, or without a row the
+// provider's name-based fallback (the gpt-6-luna family on OpenAI, a TypeSafe
+// System One model on OpenRouter, a Clef model on Cloudflare, a decider model on
+// Perplexity, a System One model on Ollama, a Microsoft decision model on Azure).
+// Any other provider hosting gpt-6-luna serves it as a chat model (OpenRouter
+// serves its decisions under its own id, openai/gpt-6-luna-decisions, marked by
+// its datasheet row). A key alias is checked as the model it points at, as the
+// request path checks it; on Azure the alias is the model name and its target a
+// deployment name of the user's choosing, so the alias name is checked too.
 func (h *ProviderHandler) supportsDecisions(provider schemas.ModelProvider, model string) bool {
-	custom := h.customProviderConfig(provider)
-	if !custom.IsOperationAllowed(schemas.DecisionRequest) {
-		return false
+	if custom := h.customProviderConfig(provider); custom != nil {
+		return custom.IsOperationAllowed(schemas.DecisionRequest) &&
+			(custom.BaseProviderType == schemas.Typesafe || custom.BaseProviderType == schemas.OpenAI)
 	}
-	if provider == schemas.Typesafe || (custom != nil && custom.BaseProviderType == schemas.Typesafe) {
+	if provider == schemas.Typesafe {
 		return true
 	}
+	listed := model
 	model = h.aliasTarget(provider, model)
-	if provider == schemas.OpenRouter {
-		return schemas.IsTypesafeModel(model)
+	var fallback bool
+	switch {
+	case provider == schemas.OpenAI:
+		fallback = schemas.DefaultSupportsDecisions(model)
+	case provider == schemas.Azure:
+		fallback = schemas.IsMicrosoftDecisionModel(listed) || schemas.IsMicrosoftDecisionModel(model)
+	case provider == schemas.OpenRouter:
+		fallback = schemas.IsTypesafeModel(model)
+	case provider == schemas.Cloudflare:
+		fallback = schemas.IsClefModel(model)
+	case provider == schemas.Perplexity:
+		fallback = schemas.IsPerplexityDeciderModel(model)
+	case provider == schemas.Ollama:
+		fallback = schemas.IsOllamaDecisionModel(model)
+	case provider == schemas.Databricks:
+		fallback = schemas.IsDatabricksDecisionModel(model)
 	}
-	return schemas.ResolveModelCaps(provider, model).SupportsDecisions(schemas.DefaultSupportsDecisions(model))
+	return schemas.ResolveModelCaps(provider, model).SupportsDecisions(fallback)
 }
 
 // customProviderConfig returns the provider's custom configuration, or nil for
@@ -1652,7 +1702,7 @@ func (h *ProviderHandler) getProviderResponseFromConfig(provider schemas.ModelPr
 
 	return ProviderResponse{
 		Name:                     provider,
-		NetworkConfig:            *config.NetworkConfig,
+		NetworkConfig:            ProviderNetworkConfigResponse{NetworkConfig: *config.NetworkConfig},
 		ConcurrencyAndBufferSize: *config.ConcurrencyAndBufferSize,
 		ProxyConfig:              config.ProxyConfig,
 		SendBackRawRequest:       config.SendBackRawRequest,
