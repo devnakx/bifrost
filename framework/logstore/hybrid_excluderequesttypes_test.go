@@ -98,8 +98,9 @@ func TestHybrid_ExcludeRequestTypes_BatchCreate(t *testing.T) {
 	require.NoError(t, hybrid.BatchCreateIfNotExists(ctx, entries))
 
 	// Summaries are copied back to the matching caller entries, not shifted by the skipped rows.
-	assert.Equal(t, "hello chat-1", chat1.ContentSummary)
-	assert.Equal(t, "hello chat-2", chat2.ContentSummary)
+	// 预览取最新一条可读消息（本地语义），chat 行的输出晚于输入，因此包含 assistant 正文
+	assert.Equal(t, "hello chat-1 output chat-1", chat1.ContentSummary)
+	assert.Equal(t, "hello chat-2 output chat-2", chat2.ContentSummary)
 
 	waitForOffload(t, inner, "chat-1")
 	waitForOffload(t, inner, "chat-2")
