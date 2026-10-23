@@ -1105,7 +1105,7 @@ export default function AppSidebar() {
 					{
 						title: "Settings",
 						url: "/workspace/cluster/settings",
-						icon: Settings2Icon,
+						icon: Settings,
 						description: "Monitoring, sample retention and memory threshold",
 						// The settings API sits under the Settings resource; saving also needs Settings update.
 						hasAccess: hasClusterConfigAccess && hasSettingsAccess,

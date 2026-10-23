@@ -212,6 +212,7 @@ func (h *HybridLogStore) processUpload(work *uploadWork) {
 		}
 	}
 
+	realtimeCorrection := work.kind == uploadKindLogMerge && gjson.GetBytes(work.payload, realtimeInputCorrectionField).Exists()
 	if work.kind == uploadKindLogMerge {
 		merged, ok := h.mergeIntoStoredObject(ctx, work)
 		if !ok {
@@ -224,6 +225,15 @@ func (h *HybridLogStore) processUpload(work *uploadWork) {
 		h.logger.Warn("objectstore: failed to upload log %s: %v", work.logID, err)
 		h.droppedUploads.Add(1)
 		return
+	}
+	if realtimeCorrection {
+		var corrected Log
+		if err := MergePayloadFromJSON(&corrected, work.payload); err == nil && corrected.InputHistory != "" {
+			_ = corrected.DeserializeFields()
+			if err := h.inner.Update(ctx, work.logID, map[string]any{"content_summary": corrected.BuildContentSummary()}); err != nil {
+				h.logger.Warn("objectstore: failed to refresh realtime input summary for log %s: %v", work.logID, err)
+			}
+		}
 	}
 	// The new object carries everything the other-format copy held, so drop
 	// that copy: a later switch back must not find it first and serve or merge
@@ -292,6 +302,11 @@ func (h *HybridLogStore) mergeIntoStoredObject(ctx context.Context, work *upload
 	existing, foundKey, err := h.getPayload(ctx, work.key)
 	if err != nil {
 		if errors.Is(err, objectstore.ErrNotFound) {
+			if gjson.GetBytes(work.payload, realtimeInputCorrectionField).Exists() {
+				h.logger.Warn("objectstore: cannot correct realtime input for missing object %s", work.logID)
+				h.droppedUploads.Add(1)
+				return nil, false
+			}
 			return work.payload, true
 		}
 		h.logger.Warn("objectstore: failed to fetch payload for log %s before merge upload, leaving the stored object untouched: %v", work.logID, err)
@@ -315,6 +330,11 @@ func (h *HybridLogStore) mergeIntoStoredObject(ctx context.Context, work *upload
 	if foundKey != work.key {
 		// The stored copy is in the other format; the merged object replaces it.
 		work.staleKey = foundKey
+	}
+	if err := mergeRealtimeInputCorrection(base, overlay); err != nil {
+		h.logger.Warn("objectstore: cannot merge realtime input correction for log %s: %v", work.logID, err)
+		h.droppedUploads.Add(1)
+		return nil, false
 	}
 	for k, v := range overlay {
 		if v != "" {
@@ -1389,6 +1409,18 @@ func (h *HybridLogStore) GetDimensionRankings(ctx context.Context, filters Searc
 	return h.inner.GetDimensionRankings(ctx, filters, dimension)
 }
 
+// GetDimensionUsage delegates to the inner store and returns each entity's usage
+// on a rollup dimension in one read.
+func (h *HybridLogStore) GetDimensionUsage(ctx context.Context, filters SearchFilters, dimension RankingDimension, compare bool) ([]DimensionUsageEntry, error) {
+	return h.inner.GetDimensionUsage(ctx, filters, dimension, compare)
+}
+
+// GetDimensionModelUsage delegates to the inner store and returns usage per
+// (entity, model, provider) on a rollup dimension in one read.
+func (h *HybridLogStore) GetDimensionModelUsage(ctx context.Context, filters SearchFilters, dimension RankingDimension) ([]DimensionModelUsageEntry, error) {
+	return h.inner.GetDimensionModelUsage(ctx, filters, dimension)
+}
+
 // GetDimensionCostHistogram delegates to the inner store and returns a cost
 // histogram bucketed by bucketSizeSeconds and grouped by the given dimension.
 func (h *HybridLogStore) GetDimensionCostHistogram(ctx context.Context, filters SearchFilters, bucketSizeSeconds int64, dimension HistogramDimension) (*DimensionCostHistogramResult, error) {
@@ -1486,6 +1518,20 @@ func (h *HybridLogStore) BatchUpdate(ctx context.Context, entries []*Log) error 
 			}
 		}
 		h.moveErrorRawBodiesToObject(&dbEntry, upload.payload)
+		if entry.RealtimeInputCorrection != nil {
+			var corrections []*RealtimeInputCorrection
+			if prior := upload.payload[realtimeInputCorrectionField]; prior != "" {
+				if err := sonic.UnmarshalString(prior, &corrections); err != nil {
+					return err
+				}
+			}
+			corrections = append(corrections, entry.RealtimeInputCorrection)
+			encoded, err := sonic.MarshalString(corrections)
+			if err != nil {
+				return err
+			}
+			upload.payload[realtimeInputCorrectionField] = encoded
+		}
 		// Tags describe the row as the batch leaves it: the selected key, virtual
 		// key, routing rule and stream flag only arrive with the completion.
 		overlayNonZeroFields(upload.tagRow, entry)
@@ -1643,6 +1689,12 @@ func (h *HybridLogStore) GetMCPCostHistogram(ctx context.Context, filters MCPToo
 // GetMCPTopTools returns the top tools used in MCP tool logs.
 func (h *HybridLogStore) GetMCPTopTools(ctx context.Context, filters MCPToolLogSearchFilters, limit int) (*MCPTopToolsResult, error) {
 	return h.inner.GetMCPTopTools(ctx, filters, limit)
+}
+
+// GetMCPToolCountsByDimension delegates to the inner store and returns each
+// entity's distinct tool count.
+func (h *HybridLogStore) GetMCPToolCountsByDimension(ctx context.Context, filters MCPToolLogSearchFilters, dimension RankingDimension) (map[string]int, error) {
+	return h.inner.GetMCPToolCountsByDimension(ctx, filters, dimension)
 }
 
 // applyMCPToolLogUpdate applies the updates from an entry to the target MCPToolLog entry.

@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,6 +99,9 @@ type HandlerStore interface {
 	ShouldSendExtraFieldsInHeaders() bool
 	// IsProviderConfigured reports whether provider has a configuration on this gateway
 	IsProviderConfigured(provider schemas.ModelProvider) bool
+	// GetCustomProviderPassthrough returns a custom provider's base provider type and whether it
+	// opted in to HTTP passthrough; ok is false when provider is not a configured custom provider
+	GetCustomProviderPassthrough(provider schemas.ModelProvider) (baseProvider schemas.ModelProvider, enabled bool, ok bool)
 	// GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the
 	// redirect_uri when acting as an OAuth client to upstream MCP servers, or empty string
 	// if not configured (falls back to dynamic Host-header-based URL).
@@ -201,12 +205,13 @@ type ConfigData struct {
 	// from config.json. Omitting this field or setting it to 2 uses v1.5.0+ semantics:
 	// empty = deny all, ["*"] = allow all. Setting it to 1 restores v1.4.x semantics:
 	// empty = allow all (equivalent to ["*"]).
-	Version       int                       `json:"version,omitempty"`
-	EnvLabel      string                    `json:"env_label,omitempty"`
-	Server        *ServerConfig             `json:"server,omitempty"`
-	SourceOfTruth string                    `json:"source_of_truth,omitempty"`
-	Client        *configstore.ClientConfig `json:"client"`
-	EncryptionKey *schemas.SecretVar        `json:"encryption_key"`
+	Version           int                       `json:"version,omitempty"`
+	EnvLabel          string                    `json:"env_label,omitempty"`
+	DisableOnboarding *bool                     `json:"disable_onboarding,omitempty"` // Hides the UI setup checklist without touching the config store
+	Server            *ServerConfig             `json:"server,omitempty"`
+	SourceOfTruth     string                    `json:"source_of_truth,omitempty"`
+	Client            *configstore.ClientConfig `json:"client"`
+	EncryptionKey     *schemas.SecretVar        `json:"encryption_key"`
 	// Deprecated: Use GovernanceConfig.AuthConfig instead
 	AuthConfig *configstore.AuthConfig `json:"auth_config,omitempty"`
 	// SetupToken is the operator-provisioned bootstrap secret required to create the
@@ -549,6 +554,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	type TempConfigData struct {
 		Version           int                                   `json:"version,omitempty"`
 		EnvLabel          string                                `json:"env_label,omitempty"`
+		DisableOnboarding *bool                                 `json:"disable_onboarding,omitempty"`
 		SourceOfTruth     string                                `json:"source_of_truth,omitempty"`
 		FrameworkConfig   json.RawMessage                       `json:"framework,omitempty"`
 		Server            *ServerConfig                         `json:"server,omitempty"`
@@ -579,6 +585,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	// Set simple fields
 	cd.Version = temp.Version
 	cd.EnvLabel = temp.EnvLabel
+	cd.DisableOnboarding = temp.DisableOnboarding
 	cd.SourceOfTruth = normalizeSourceOfTruth(temp.SourceOfTruth)
 	cd.Client = temp.Client
 	cd.Server = temp.Server
@@ -801,6 +808,8 @@ type Config struct {
 	// EnvLabel is a short label (max 10 chars) displayed in the UI sidebar to identify the
 	// environment (e.g. "staging", "prod"). Set via config.json env_label or BIFROST_ENV_LABEL env var.
 	EnvLabel string
+
+	DisableOnboarding bool // Hides the UI setup checklist for every user
 
 	// StreamingDecompressThreshold overrides the default threshold (10MB) for
 	// switching from buffered to streaming request decompression. Set by
@@ -1237,6 +1246,13 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		config.EnvLabel = truncateLabel(label)
 	} else if label := strings.TrimSpace(os.Getenv("BIFROST_ENV_LABEL")); label != "" {
 		config.EnvLabel = truncateLabel(label)
+	}
+	// 14a. Disable onboarding (config.json takes precedence over BIFROST_DISABLE_ONBOARDING env var).
+	// Never persisted, so it holds on deployments whose config store does not survive a restart.
+	if configData.DisableOnboarding != nil {
+		config.DisableOnboarding = *configData.DisableOnboarding
+	} else if v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("BIFROST_DISABLE_ONBOARDING"))); err == nil {
+		config.DisableOnboarding = v
 	}
 	// 15. WebSocket defaults
 	if configData.WebSocket != nil {
@@ -1735,6 +1751,7 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 	} else {
 		// Full hash mismatch - file changed, sync from file (file takes precedence)
 		logger.Info("client config was updated in config.json, syncing. Note that: file config takes precedence.")
+		noteConfigFileApplied("client_config", "client")
 		sanitizeMCPExternalOAuthURLs(configData.Client)
 		config.ClientConfig = configData.Client
 		config.ClientConfig.ConfigHash = fileHash
@@ -1912,6 +1929,9 @@ func processProvider(
 	if err := ValidateCustomProvider(providerCfgInFile, provider); err != nil {
 		return err
 	}
+	if err := providerCfgInFile.Passthrough.Validate(); err != nil {
+		return fmt.Errorf("invalid passthrough for provider %s: %w", provider, err)
+	}
 
 	baseProvider := provider
 	if providerCfgInFile.CustomProviderConfig != nil && providerCfgInFile.CustomProviderConfig.BaseProviderType != "" {
@@ -1950,6 +1970,9 @@ func processAuthoritativeProvider(
 	if err := ValidateCustomProvider(providerCfgInFile, provider); err != nil {
 		logger.Warn("invalid custom provider config for %s (writing through): %v", provider, err)
 	}
+	if err := providerCfgInFile.Passthrough.Validate(); err != nil {
+		logger.Warn("invalid passthrough for provider %s (writing through): %v", provider, err)
+	}
 	baseProvider := provider
 	if providerCfgInFile.CustomProviderConfig != nil && providerCfgInFile.CustomProviderConfig.BaseProviderType != "" {
 		baseProvider = providerCfgInFile.CustomProviderConfig.BaseProviderType
@@ -1985,12 +2008,14 @@ func mergeProviderWithHash(
 	if !exists {
 		// New provider - add from config.json
 		providersInConfigStore[provider] = providerCfgInFile
+		noteConfigFileApplied("provider", string(provider))
 		return
 	}
 	// Provider exists in DB - compare hashes
 	if existingCfg.ConfigHash != providerCfgInFile.ConfigHash {
 		// Hash mismatch - config.json was changed, sync from file
 		logger.Debug("config hash mismatch for provider %s, syncing from config file", provider)
+		noteConfigFileApplied("provider", string(provider))
 		mergedKeys := mergeProviderKeys(provider, providerCfgInFile.Keys, existingCfg.Keys)
 		providerCfgInFile.Keys = mergedKeys
 		providersInConfigStore[provider] = providerCfgInFile
@@ -2052,7 +2077,6 @@ func mergeProviderKeys(provider schemas.ModelProvider, keysInConfigJSON, dbKeys 
 					OllamaKeyConfig:        dbKey.OllamaKeyConfig,
 					SGLKeyConfig:           dbKey.SGLKeyConfig,
 					DatabricksKeyConfig:    dbKey.DatabricksKeyConfig,
-					GithubCopilotKeyConfig: dbKey.GithubCopilotKeyConfig,
 					CloudflareKeyConfig:    dbKey.CloudflareKeyConfig,
 					OAuthKeyConfig:         dbKey.OAuthKeyConfig,
 					Enabled:                dbKey.Enabled,
@@ -2145,7 +2169,6 @@ func reconcileProviderKeys(provider schemas.ModelProvider, keysInConfigJSON, dbK
 					OllamaKeyConfig:        dbKey.OllamaKeyConfig,
 					SGLKeyConfig:           dbKey.SGLKeyConfig,
 					DatabricksKeyConfig:    dbKey.DatabricksKeyConfig,
-					GithubCopilotKeyConfig: dbKey.GithubCopilotKeyConfig,
 					CloudflareKeyConfig:    dbKey.CloudflareKeyConfig,
 					OAuthKeyConfig:         dbKey.OAuthKeyConfig,
 					Enabled:                dbKey.Enabled,
@@ -2727,6 +2750,7 @@ func mergeMCPConfig(ctx context.Context, config *Config, configData *ConfigData,
 				found = true
 				if existingClientConfig.ConfigHash != fileHash {
 					logger.Debug("config hash mismatch for MCP client %q, syncing from config file", newClientConfig.Name)
+					noteConfigFileApplied("mcp_client", newClientConfig.Name)
 					newClientConfig.ID = existingClientConfig.ID
 					// Pin immutable fields to their stored values and carry
 					// server-side verification state (authorized OAuth link,
@@ -7621,6 +7645,18 @@ func (c *Config) IsProviderConfigured(provider schemas.ModelProvider) bool {
 	return exists
 }
 
+// GetCustomProviderPassthrough returns a custom provider's base provider type and whether it
+// set a passthrough policy, which is how a custom provider opts in to HTTP passthrough.
+func (c *Config) GetCustomProviderPassthrough(provider schemas.ModelProvider) (schemas.ModelProvider, bool, bool) {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+	config, exists := c.Providers[provider]
+	if !exists || config.CustomProviderConfig == nil {
+		return "", false, false
+	}
+	return config.CustomProviderConfig.BaseProviderType, config.Passthrough != nil, true
+}
+
 // GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the
 // redirect_uri when acting as an OAuth client to upstream MCP servers, or empty string
 // if not configured. Resolves env var references automatically.
@@ -9008,15 +9044,6 @@ func (c *Config) GetAllKeys() ([]configstoreTables.TableKey, error) {
 				cfg.ClientSecret = cfg.ClientSecret.Redacted()
 				configStoreKey.DatabricksKeyConfig = &cfg
 			}
-			if key.GithubCopilotKeyConfig != nil {
-				cfg := *key.GithubCopilotKeyConfig // safe copy
-				cfg.AppID = *cfg.AppID.Redacted()
-				cfg.InstallationID = *cfg.InstallationID.Redacted()
-				cfg.RepositoryID = *cfg.RepositoryID.Redacted()
-				cfg.PrivateKey = *cfg.PrivateKey.Redacted()
-				cfg.GithubDomain = *cfg.GithubDomain.Redacted()
-				configStoreKey.GithubCopilotKeyConfig = &cfg
-			}
 			if key.CloudflareKeyConfig != nil {
 				cfg := *key.CloudflareKeyConfig // safe copy
 				// The account ID is an identifier, not a credential — surface it in plaintext.
@@ -9854,6 +9881,51 @@ func ValidateInjectedToolsBody(body []byte) error {
 		for _, field := range slices.Sorted(maps.Keys(fields)) {
 			if _, ok := injectedToolFields[field]; !ok {
 				return fmt.Errorf("injected tools validation failed: injected_tools[%d] has unknown field %q", i, field)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidatePassthroughBody checks the raw passthrough block of a provider write body. Typed
+// decoding drops unknown fields, and a dropped allowed_routes (a typo, a rule placed one
+// level up) decodes to an empty list, which forwards no routes at all. The block must
+// therefore name allowed_routes explicitly; [] is how a write turns passthrough off.
+// A null or absent block is fine. Bodies that fail to decode are left to the handler.
+func ValidatePassthroughBody(body []byte) error {
+	var payload struct {
+		Passthrough json.RawMessage `json:"passthrough"`
+	}
+	if sonic.Unmarshal(body, &payload) != nil || len(payload.Passthrough) == 0 || string(payload.Passthrough) == "null" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if sonic.Unmarshal(payload.Passthrough, &fields) != nil {
+		return fmt.Errorf("passthrough must be an object")
+	}
+	for _, field := range slices.Sorted(maps.Keys(fields)) {
+		if field != "allowed_routes" {
+			return fmt.Errorf("passthrough has unknown field %q", field)
+		}
+	}
+	routes, ok := fields["allowed_routes"]
+	if !ok || string(routes) == "null" {
+		return fmt.Errorf("passthrough.allowed_routes is required; use [] to forward no routes")
+	}
+	var rules []json.RawMessage
+	if sonic.Unmarshal(routes, &rules) != nil {
+		return fmt.Errorf("passthrough.allowed_routes must be an array")
+	}
+	for i, rule := range rules {
+		var ruleFields map[string]json.RawMessage
+		if string(rule) == "null" || sonic.Unmarshal(rule, &ruleFields) != nil {
+			return fmt.Errorf("passthrough.allowed_routes[%d] must be an object", i)
+		}
+		for _, field := range slices.Sorted(maps.Keys(ruleFields)) {
+			switch field {
+			case "methods", "path":
+			default:
+				return fmt.Errorf("passthrough.allowed_routes[%d] has unknown field %q", i, field)
 			}
 		}
 	}
