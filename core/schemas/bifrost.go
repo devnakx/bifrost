@@ -304,6 +304,7 @@ const (
 	BifrostContextKeyStreamCancellationGrace             BifrostContextKey = "bifrost-stream-cancellation-grace"       // time.Duration (客户端取消后继续读上游终止事件的窗口，0 表示立即断开)
 	BifrostContextKeyStreamFirstTokenTimeout             BifrostContextKey = "bifrost-stream-first-token-timeout"      // time.Duration (TTFT deadline for streaming requests: an attempt with no first token in time is cut off and the next fallback runs; the last attempt is never cut off. Set by the routing plugin or an SDK caller)
 	BifrostContextKeyStreamAttemptAbort                  BifrostContextKey = "bifrost-stream-attempt-abort"            // *providerUtils.AttemptAbort (set by bifrost for one stream attempt with a first-token deadline - DO NOT SET THIS MANUALLY)
+	BifrostContextKeyStreamCommitWatch                   BifrostContextKey = "bifrost-stream-commit-watch"             // bool (set by bifrost when a held stream attempt produces its first output; consumed by the pause/resume gate - DO NOT SET THIS MANUALLY)
 	BifrostContextKeySkipKeySelection                    BifrostContextKey = "bifrost-skip-key-selection"              // bool (will pass an empty key to the provider)
 	BifrostContextKeyExtraHeaders                        BifrostContextKey = "bifrost-extra-headers"                   // map[string][]string
 	BifrostContextKeyPassthroughHeaders                  BifrostContextKey = "bifrost-anthropic-passthrough-headers"   // map[string][]string (the caller's raw request headers, captured for Anthropic OAuth passthrough where their token is the upstream credential; ONLY the Anthropic provider may forward these — every other provider authenticates with its own configured credentials. Reserved: set by the transport, never by a plugin)
@@ -2095,6 +2096,18 @@ type BifrostStreamChunk struct {
 	*BifrostPassthroughResponse
 	*BifrostError
 }
+
+// streamCommitMarker is the sentinel returned by StreamCommitMarker. It carries no payload.
+var streamCommitMarker = &BifrostStreamChunk{}
+
+// StreamCommitMarker returns the sentinel chunk the pause/resume gate sends when a plugin
+// holds a stream whose upstream has already produced valid output. The first-chunk check
+// treats it as the stream having started, so the transport commits its response and starts
+// heartbeats while the plugin keeps the content buffered, and never forwards it to consumers.
+func StreamCommitMarker() *BifrostStreamChunk { return streamCommitMarker }
+
+// IsStreamCommitMarker reports whether chunk is the StreamCommitMarker sentinel.
+func IsStreamCommitMarker(chunk *BifrostStreamChunk) bool { return chunk == streamCommitMarker }
 
 // MarshalJSON implements custom JSON marshaling for BifrostStreamChunk.
 // This ensures that only the non-nil embedded struct is marshaled,

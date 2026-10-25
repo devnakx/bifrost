@@ -1690,11 +1690,11 @@ func TestListModels_DecisionsOllamaListsSystemOneModels(t *testing.T) {
 	}
 }
 
-// TestListModels_DecisionsAzureListsMicrosoftDecisionModels pins that decisions=true
-// lists Microsoft's decision models on Azure, by name or through a key alias whose
-// target is a deployment named otherwise, and not gpt-6-luna or chat deployments:
-// Azure serves those as chat models.
-func TestListModels_DecisionsAzureListsMicrosoftDecisionModels(t *testing.T) {
+// TestListModels_DecisionsAzureListsDecisionModels pins that decisions=true lists
+// Azure's decision models, Microsoft's (by name or through a key alias whose target
+// is a deployment named otherwise) and the gpt-6-luna family, which Azure serves on
+// /openai/v1/decisions, and not chat deployments.
+func TestListModels_DecisionsAzureListsDecisionModels(t *testing.T) {
 	SetLogger(&mockLogger{})
 	schemas.SetCapabilityResolver(func(schemas.ModelProvider, string) *schemas.ModelCapabilities { return nil })
 	t.Cleanup(func() { schemas.SetCapabilityResolver(nil) })
@@ -1702,7 +1702,7 @@ func TestListModels_DecisionsAzureListsMicrosoftDecisionModels(t *testing.T) {
 	key := schemas.Key{ID: "key-a", Models: schemas.WhiteList{"*"}, Aliases: schemas.KeyAliases{
 		"Microsoft-Decision-1": {ModelID: "Decision-1"},
 	}}
-	listed := []string{"Microsoft-Decision-1", "microsoft-decision-2", "gpt-6-luna", "gpt-4o"}
+	listed := []string{"Microsoft-Decision-1", "microsoft-decision-2", "gpt-6-luna", "gpt-6-luna-2026-09-22", "gpt-4o"}
 	h := providerHandlerForTest(schemas.Azure, []schemas.Key{key}, listed, listed)
 	catalog := modelCatalogForPricingJSON(t, []byte(`{"azure/gpt-4o": {"provider":"azure","mode":"chat"}}`))
 	catalog.SetKeyConfigForProvider(schemas.Azure, []schemas.Key{key})
@@ -1725,20 +1725,24 @@ func TestListModels_DecisionsAzureListsMicrosoftDecisionModels(t *testing.T) {
 		names = append(names, model.Name)
 	}
 	slices.Sort(names)
-	if want := []string{"Microsoft-Decision-1", "microsoft-decision-2"}; !slices.Equal(names, want) {
+	if want := []string{"Microsoft-Decision-1", "gpt-6-luna", "gpt-6-luna-2026-09-22", "microsoft-decision-2"}; !slices.Equal(names, want) {
 		t.Fatalf("expected %v, got %v", want, names)
 	}
 }
 
-// TestListModels_DecisionsDatabricksListsAIDecide pins that a decisions listing on
-// Databricks offers ai_decide, the one model its Decision serves natively, and not the
-// workspace's serving endpoints.
-func TestListModels_DecisionsDatabricksListsAIDecide(t *testing.T) {
+// TestListModels_DecisionsDatabricksListsDecisionModels pins that a decisions listing on
+// Databricks offers the models its Decision serves natively, ai_decide and the System One
+// models by their Unity Catalog names, and not the workspace's serving endpoints, including
+// a System One model's own endpoint name, which the systemone route rejects.
+func TestListModels_DecisionsDatabricksListsDecisionModels(t *testing.T) {
 	SetLogger(&mockLogger{})
 	schemas.SetCapabilityResolver(func(schemas.ModelProvider, string) *schemas.ModelCapabilities { return nil })
 	t.Cleanup(func() { schemas.SetCapabilityResolver(nil) })
 
-	listed := []string{"ai_decide", "databricks-claude-sonnet-4", "databricks-gpt-oss-120b"}
+	listed := []string{
+		"ai_decide", "system.ai.openjev-qwen35-4b", "system.ai.typesafeai-jev-1-14-0",
+		"databricks-openjev-qwen35-4b", "databricks-claude-sonnet-4", "databricks-gpt-oss-120b",
+	}
 	h := providerHandlerForTest(schemas.Databricks, []schemas.Key{{ID: "key-a"}}, listed, listed)
 
 	ctx := &fasthttp.RequestCtx{}
@@ -1757,7 +1761,7 @@ func TestListModels_DecisionsDatabricksListsAIDecide(t *testing.T) {
 	for _, model := range resp.Models {
 		names = append(names, model.Name)
 	}
-	if want := []string{"ai_decide"}; !slices.Equal(names, want) {
+	if want := []string{"ai_decide", "system.ai.openjev-qwen35-4b", "system.ai.typesafeai-jev-1-14-0"}; !slices.Equal(names, want) {
 		t.Fatalf("expected %v, got %v", want, names)
 	}
 }
@@ -1953,7 +1957,7 @@ func TestEnrichListModelsResponse_MarksDeprecatedPricingRows(t *testing.T) {
 		{ID: "openai/provider-deprecated", IsDeprecated: true},
 	}}
 
-	enrichListModelsResponse(resp, catalog)
+	catalog.EnrichListModelsResponse(resp)
 
 	if len(resp.Data) != 3 {
 		t.Fatalf("expected all models retained, got %#v", resp.Data)

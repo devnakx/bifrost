@@ -731,6 +731,16 @@
               "description": "Delete expired virtual keys automatically. A daily cleanup job removes every key whose expiry has passed unless the key sets delete_after_expire to false; keys with delete_after_expire true are removed regardless. Maps to client.delete_expired_virtual_keys.",
               "default": false
             },
+            "skipAccessProfileUserVirtualKeyCreation": {
+              "type": "boolean",
+              "description": "Enterprise only. When true, a user's first access profile never creates a virtual key for them. Maps to client.skip_access_profile_user_virtual_key_creation.",
+              "default": false
+            },
+            "skipAccessProfileUserVirtualKeyDeletion": {
+              "type": "boolean",
+              "description": "Enterprise only. When true, removing a user's last access profile never deletes their virtual keys; they are kept as ordinary keys. Deleting the user still deletes their keys. Maps to client.skip_access_profile_user_virtual_key_deletion.",
+              "default": false
+            },
             "mcpDisableAutoToolInject": {
               "type": "boolean",
               "description": "DEPRECATED: When true, MCP tools are not automatically injected into requests. Use bifrost.mcp.toolManagerConfig.disableAutoToolInject.",
@@ -3452,6 +3462,11 @@
                         "type": "string",
                         "description": "Okta API token for Admin API access (optional; enables 24-hour background user/group reconciliation)"
                       },
+                      "syncAllUsers": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Which Okta users directory sync (apiToken) keeps. True (the default when unset) syncs every app-assigned user except those SUSPENDED or DEPROVISIONED (deactivated); false syncs ACTIVE users only. Maps to scim_config.config.syncAllUsers."
+                      },
                       "audience": {
                         "type": "string",
                         "description": "JWT audience for validation (optional)"
@@ -5839,6 +5854,11 @@
               "type": "string",
               "description": "Maximum time for a single materialized view refresh pass (min 30s, max 30m). Unset derives 5x the refresh interval, at least 5m. A cancelled refresh leaves the existing views intact and readable, just staler; the next tick retries.",
               "pattern": "^[1-9][0-9]*(ns|us|µs|ms|s|m|h)$"
+            },
+            "matviewRefreshTempFileLimit": {
+              "type": "string",
+              "description": "Caps the temp files each Postgres process running a materialized view statement may write (Postgres temp_file_limit, e.g. '10GB'; parallel workers each get the cap). Unset leaves the server setting alone. Needs superuser or GRANT SET ON PARAMETER temp_file_limit; otherwise skipped with a warning.",
+              "pattern": "^(-1|[0-9]+ ?(kB|MB|GB|TB)?)$"
             },
             "migrationMatviewCancelAfter": {
               "type": "string",
